@@ -1,0 +1,21 @@
+[package]
+name = "remote64-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+remote64-common = { path = "../common" }
+websocket = { version = "0.26", default-features = false, features = ["sync", "sync-ssl"] }
+
+log = "0.4"
+pretty_env_logger = "0.4"
+clap = "3.1"
+crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
+zstd = "*"
+
+minifb = "0.20"
+v4l = { version = "0.12", features = ["v4l2"] }
+portaudio = "0.7"
+image = "0.24"
+hound = "3.4"

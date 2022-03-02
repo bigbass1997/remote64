@@ -1,0 +1,13 @@
+[package]
+name = "remote64-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+remote64-common = { path = "../common" }
+websocket = { version = "0.26", default-features = false, features = ["sync"] }
+
+clap = "3.1"
+zstd = "*"
+
+minifb = "0.20"
