@@ -22,9 +22,10 @@ This project enables automatic testing of new builds at any time.
 
 ### Server Capabilities
 The bare minimum a server setup requires is some method to automatically upload and start the provided ROM image, and a
-capture device to record the video output with.
+capture device to record the video output with. The server software will not work without a valid video stream, even if
+live playback isn't enabled.
 
 Optional capabilities include:
-- Audio recording
 - Live playback (requires decent upload speed)
+- Audio recording (for final recording, and live playback if enabled)
 - Controller input (requires live playback and input passthrough)
