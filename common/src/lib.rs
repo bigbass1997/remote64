@@ -21,8 +21,10 @@ pub const ID_PING: u8 = 0x01;
 pub const ID_PONG: u8 = 0x02;
 pub const ID_INFO_REQ: u8 = 0x03;
 pub const ID_INFO_RES: u8 = 0x04;
-pub const ID_IMAGE_REQ: u8 = 0x05;
-pub const ID_IMAGE_RES: u8 = 0x06;
+pub const ID_QUEUE_REQ: u8 = 0x05;
+pub const ID_QUEUE_RES: u8 = 0x06;
+pub const ID_IMAGE_REQ: u8 = 0x07;
+pub const ID_IMAGE_RES: u8 = 0x08;
 pub const ID_REQ_DENIED: u8 = 0xFE;
 pub const ID_UNKNOWN: u8 = 0xFF;
 
@@ -69,13 +71,14 @@ pub enum Packet {
     Pong,
     InfoRequest,
     InfoResponse(ServerInfo),
+    QueueRequest,
+    QueueResponse(u32),
     ImageRequest,
     ImageResponse(Vec<u8>),
     RequestDenied,
     Unknown(Vec<u8>),
 }
 use Packet::*;
-use crate::Capability::Invalid;
 
 impl Packet {
     pub fn deserialize(data: &[u8]) -> Result<Packet, PacketError> {
@@ -101,6 +104,12 @@ impl Packet {
                     capabilities,
                 }))
             },
+            ID_QUEUE_REQ => Ok(QueueRequest),
+            ID_QUEUE_RES => {
+                if data.len() != 5 { return Err(UnexpectedLength) }
+                
+                Ok(QueueResponse(u32::from_be_bytes([data[1], data[2], data[3], data[4]])))
+            },
             ID_IMAGE_REQ => Ok(ImageRequest),
             ID_IMAGE_RES => Ok(ImageResponse(data[1..].to_vec())),
             
@@ -115,6 +124,8 @@ impl Packet {
             Pong => ID_PONG,
             InfoRequest => ID_INFO_REQ,
             InfoResponse(_) => ID_INFO_RES,
+            QueueRequest => ID_QUEUE_REQ,
+            QueueResponse(_) => ID_QUEUE_RES,
             ImageRequest => ID_IMAGE_REQ,
             ImageResponse(_) => ID_IMAGE_RES,
             
@@ -130,6 +141,8 @@ impl Packet {
             Pong => (),
             InfoRequest => (),
             InfoResponse(info) => raw.extend_from_slice(&info.serialize()),
+            QueueRequest => (),
+            QueueResponse(data) => raw.extend_from_slice(&data.to_be_bytes()),
             ImageRequest => (),
             ImageResponse(data) => raw.extend_from_slice(&data),
             

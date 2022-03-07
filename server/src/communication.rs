@@ -43,7 +43,6 @@ impl SocketClient {
 pub struct SocketManager {
     socket: WsServer,
     client_queue: VecDeque<SocketClient>,
-    active_client: Option<SocketClient>,
 }
 
 impl SocketManager {
@@ -64,11 +63,11 @@ impl SocketManager {
         let mut sm = SocketManager {
             socket,
             client_queue: VecDeque::new(),
-            active_client: None,
         };
         
         std::thread::Builder::new().name("SocketManager".to_owned()).spawn(move || {
             loop {
+                // Accept any waiting connection requests, and add them to the queue
                 while let Ok(request) = sm.socket.accept() {
                     match request.accept() {
                         Ok(client) => {
@@ -76,11 +75,7 @@ impl SocketManager {
                                 Ok(_) => (),
                                 Err(err) => warn!("Failed to set client nonblocking: {:?}", err)
                             }
-                            if let Ok(peer) = client.peer_addr() {
-                                info!("Client {} connected.", peer);
-                            } else {
-                                info!("Client connected.");
-                            }
+                            info!("Client {} connected.", parse_peer(&client));
                             sm.client_queue.push_back(SocketClient::new(client));
                             
                         },
@@ -88,17 +83,19 @@ impl SocketManager {
                     }
                 }
                 
+                // Client keep-alive and message passing
+                //   Clients that have not responded to any pings for a period of time, will be
+                //     disconnected and removed from the queue.
+                //   This section also handles passing of messages between the server and clients.
+                //   The client at the front of the queue is the "active" client. Image requests
+                //     from "non-active" clients will be rejected.
                 let mut disconnects = vec![];
                 for (i, client) in sm.client_queue.iter_mut().enumerate() {
                     while let Ok(msg) = client.socket.recv_message() {
                         match msg {
                             OwnedMessage::Close(_) => {
                                 disconnects.push(i);
-                                if let Ok(peer) = client.socket.peer_addr() {
-                                    info!("Client {} disconnected.", peer);
-                                } else {
-                                    info!("Client disconnected.");
-                                }
+                                info!("Client {} disconnected.", parse_peer(&client.socket));
                                 continue;
                             },
                             OwnedMessage::Binary(data) => {
@@ -112,80 +109,38 @@ impl SocketManager {
                                 
                                 match packet {
                                     InfoRequest => send_packet(client, InfoResponse(server_info.clone())),
-                                    Ping => send_packet(client, Pong),
-                                    Pong => client.last_pong = Instant::now(),
+                                    QueueRequest => send_packet(client, QueueResponse(i as u32)),
+                                    Ping => {
+                                        debug!("Ping! {}", parse_peer(&client.socket));
+                                        send_packet(client, Pong)
+                                    },
+                                    Pong => {
+                                        debug!("Pong! {}", parse_peer(&client.socket));
+                                        client.last_pong = Instant::now()
+                                    },
                                     
+                                    ImageRequest if i == 0 => { // if client is at front of queue
+                                        client.requesting_image = true;
+                                        request_image_send.try_send(()).unwrap_or_default()
+                                    }
                                     ImageRequest => send_packet(client, RequestDenied),
                                     
-                                    InfoResponse(_) | ImageResponse(_) | RequestDenied | Unknown(_) => (),
+                                    InfoResponse(_) | QueueResponse(_) | ImageResponse(_) | RequestDenied | Unknown(_) => (),
                                 }
                             },
                             _ => ()
                         }
                     }
-                    if client.last_pong.elapsed() > Duration::from_secs(45) {
+                    if client.last_pong.elapsed() > Duration::from_secs(22) {
                         disconnects.push(i);
                         continue;
-                    }
-                    if client.last_ping.elapsed() > Duration::from_secs(25) {
-                        send_packet(client, Ping);
-                        client.last_ping = Instant::now();
-                    }
-                }
-                disconnects.sort();
-                for i in disconnects.iter().rev() {
-                    sm.client_queue.remove(*i);
-                }
-                
-                
-                if sm.active_client.is_none() && !sm.client_queue.is_empty() {
-                    sm.active_client = sm.client_queue.pop_front();
-                }
-                
-                let mut disconnect = false;
-                if let Some(client) = &mut sm.active_client {
-                    while let Ok(msg) = client.socket.recv_message() {
-                        match msg {
-                            OwnedMessage::Close(_) => {
-                                disconnect = true;
-                                break;
-                            },
-                            OwnedMessage::Binary(data) => {
-                                let packet = match Packet::deserialize(&data) {
-                                    Ok(packet) => packet,
-                                    Err(err) => {
-                                        warn!("Malformed packet: {:?}", err);
-                                        continue;
-                                    }
-                                };
-                                
-                                match packet {
-                                    InfoRequest => send_packet(client, InfoResponse(server_info.clone())),
-                                    Ping => send_packet(client, Pong),
-                                    Pong => {
-                                        client.last_pong = Instant::now();
-                                        debug!("Pong from {}", client.socket.peer_addr().unwrap());
-                                    },
-                                    
-                                    ImageRequest => {
-                                        client.requesting_image = true;
-                                        match request_image_send.try_send(()) { _ => () }
-                                    },
-                                    
-                                    InfoResponse(_) | ImageResponse(_) | RequestDenied | Unknown(_) => (),
-                                }
-                            },
-                            _ => ()
-                        }
-                    }
-                    debug!("last_pong elapsed: {}sec", client.last_pong.elapsed().as_secs());
-                    if client.last_pong.elapsed() > Duration::from_secs(15) {
-                        disconnect = true;
                     } else {
-                        if client.last_ping.elapsed() > Duration::from_secs(5) {
+                        if client.last_ping.elapsed() > Duration::from_secs(10) {
+                            debug!("Ping! {}", parse_peer(&client.socket));
                             send_packet(client, Ping);
                             client.last_ping = Instant::now();
                         }
+                        
                         
                         if client.requesting_image {
                             if let Ok(image) = image_response_recv.try_recv() {
@@ -200,15 +155,9 @@ impl SocketManager {
                         }
                     }
                 }
-                if disconnect {
-                    let client = sm.active_client.as_ref().unwrap();
-                    if let Ok(peer) = client.socket.peer_addr() {
-                        info!("Client {} disconnected.", peer);
-                    } else {
-                        info!("Client disconnected.");
-                    }
-                    client.socket.shutdown().unwrap_or_default();
-                    sm.active_client = None;
+                disconnects.sort();
+                for i in disconnects.iter().rev() {
+                    sm.client_queue.remove(*i);
                 }
             }
         }).unwrap();
@@ -224,4 +173,11 @@ fn send_packet(client: &mut SocketClient, packet: Packet) {
         Err(err) => warn!("Failed to send message: {:?}", err)
     }
     client.socket.set_nonblocking(true).unwrap();
+}
+
+fn parse_peer(socket: &WsClient) -> String {
+    match socket.peer_addr() {
+        Ok(addr) => addr.to_string(),
+        Err(_) => "unknown".to_owned()
+    }
 }

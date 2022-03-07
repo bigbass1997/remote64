@@ -81,6 +81,8 @@ fn main() {
     let (image_request, image_sender) = SocketManager::new(capabilities);
     
     
+    
+    
     let mut window_buf: Vec<u32> = vec![0; WIDTH * HEIGHT];
     let mut window = Window::new("remote64-server", WIDTH, HEIGHT, WindowOptions {
         borderless: false,
