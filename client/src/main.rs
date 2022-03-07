@@ -33,6 +33,10 @@ fn main() {
     while window.is_open() && !window.is_key_down(Key::Escape) {
         match socket.recv_message() {
             Ok(msg) => match msg {
+                OwnedMessage::Close(_) => {
+                    info!("Connection closed by server.");
+                    return;
+                },
                 OwnedMessage::Binary(data) => {
                     match Packet::deserialize(&data) {
                         Ok(packet) => match packet {
