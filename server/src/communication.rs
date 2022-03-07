@@ -13,7 +13,6 @@ pub const INFO_VERSION: u16 = 0x0000;
 type WsClient = Client<TcpStream>;
 type WsServer = Server<NoTlsAcceptor>;
 
-pub type ImageRequestChannel = (Receiver<()>, Sender<Vec<u8>>);
 
 
 /// Contains the status of a connected client.
@@ -48,7 +47,7 @@ pub struct SocketManager {
 }
 
 impl SocketManager {
-    pub fn new(capabilities: Vec<Capability>) -> ImageRequestChannel {
+    pub fn new(capabilities: Vec<Capability>) -> (Receiver<()>, Sender<Vec<u8>>) {
         let server_info = ServerInfo {
             header: INFO_HEADER,
             version: INFO_VERSION,
@@ -56,8 +55,7 @@ impl SocketManager {
         };
         
         let (request_image_send, request_image_recv) = bounded(1);
-        let (image_response_send, image_response_recv) = bounded::<Vec<u8>>(1);
-        let chan = (request_image_recv, image_response_send) as ImageRequestChannel;
+        let (image_response_send, image_response_recv) = bounded::<Vec<u8>>(1); // TODO: Change this to a channel of Packets instead of just images
         
         
         let socket = WsServer::bind("0.0.0.0:6400").unwrap();
@@ -71,19 +69,22 @@ impl SocketManager {
         
         std::thread::Builder::new().name("SocketManager".to_owned()).spawn(move || {
             loop {
-                while let Some(request) = sm.socket.next() {
-                    match request {
-                        Ok(request) => match request.accept() {
-                            Ok(client) => {
-                                match client.set_nonblocking(true) {
-                                    Ok(_) => (),
-                                    Err(err) => warn!("Failed to set client nonblocking: {:?}", err)
-                                }
-                                sm.client_queue.push_back(SocketClient::new(client));
-                            },
-                            Err(err) => warn!("Failed to accept client: {:?}", err)
+                while let Ok(request) = sm.socket.accept() {
+                    match request.accept() {
+                        Ok(client) => {
+                            match client.set_nonblocking(true) {
+                                Ok(_) => (),
+                                Err(err) => warn!("Failed to set client nonblocking: {:?}", err)
+                            }
+                            if let Ok(peer) = client.peer_addr() {
+                                info!("Client {} connected.", peer);
+                            } else {
+                                info!("Client connected.");
+                            }
+                            sm.client_queue.push_back(SocketClient::new(client));
+                            
                         },
-                        Err(err) => warn!("Failed client request: {:?}", err)
+                        Err(err) => warn!("Failed to accept client: {:?}", err)
                     }
                 }
                 
@@ -147,12 +148,7 @@ impl SocketManager {
                         match msg {
                             OwnedMessage::Close(_) => {
                                 disconnect = true;
-                                if let Ok(peer) = client.socket.peer_addr() {
-                                    info!("Client {} disconnected.", peer);
-                                } else {
-                                    info!("Client disconnected.");
-                                }
-                                continue;
+                                break;
                             },
                             OwnedMessage::Binary(data) => {
                                 let packet = match Packet::deserialize(&data) {
@@ -166,7 +162,10 @@ impl SocketManager {
                                 match packet {
                                     InfoRequest => send_packet(client, InfoResponse(server_info.clone())),
                                     Ping => send_packet(client, Pong),
-                                    Pong => client.last_pong = Instant::now(),
+                                    Pong => {
+                                        client.last_pong = Instant::now();
+                                        debug!("Pong from {}", client.socket.peer_addr().unwrap());
+                                    },
                                     
                                     ImageRequest => {
                                         client.requesting_image = true;
@@ -179,18 +178,21 @@ impl SocketManager {
                             _ => ()
                         }
                     }
-                    if client.last_pong.elapsed() > Duration::from_secs(45) {
+                    debug!("last_pong elapsed: {}sec", client.last_pong.elapsed().as_secs());
+                    if client.last_pong.elapsed() > Duration::from_secs(15) {
                         disconnect = true;
                     } else {
-                        if client.last_ping.elapsed() > Duration::from_secs(25) {
+                        if client.last_ping.elapsed() > Duration::from_secs(5) {
                             send_packet(client, Ping);
                             client.last_ping = Instant::now();
                         }
                         
                         if client.requesting_image {
                             if let Ok(image) = image_response_recv.try_recv() {
-                                match zstd::encode_all(&*image, 3) {
-                                    Ok(data) => send_packet(client, ImageResponse(data)),
+                                match zstd::encode_all(image.as_slice(), 3) {
+                                    Ok(data) => {
+                                        send_packet(client, ImageResponse(data));
+                                    },
                                     Err(err) => warn!("Failed to compress image data: {:?}", err)
                                 }
                                 client.requesting_image = false;
@@ -199,18 +201,27 @@ impl SocketManager {
                     }
                 }
                 if disconnect {
+                    let client = sm.active_client.as_ref().unwrap();
+                    if let Ok(peer) = client.socket.peer_addr() {
+                        info!("Client {} disconnected.", peer);
+                    } else {
+                        info!("Client disconnected.");
+                    }
+                    client.socket.shutdown().unwrap_or_default();
                     sm.active_client = None;
                 }
             }
         }).unwrap();
         
-        chan
+        (request_image_recv, image_response_send)
     }
 }
 
 fn send_packet(client: &mut SocketClient, packet: Packet) {
+    client.socket.set_nonblocking(false).unwrap();
     match client.socket.send_message(&OwnedMessage::Binary(packet.serialize())) {
         Ok(_) => (),
         Err(err) => warn!("Failed to send message: {:?}", err)
     }
+    client.socket.set_nonblocking(true).unwrap();
 }

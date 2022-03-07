@@ -1,13 +1,16 @@
 
-extern crate pretty_env_logger;
+extern crate env_logger;
 #[macro_use] extern crate log;
 
+use std::str::FromStr;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use clap::{AppSettings, Arg, Command};
 use crossbeam_channel::{bounded, unbounded};
 use hound::WavWriter;
 use image::{ImageFormat, RgbImage};
+use log::LevelFilter;
 use minifb::{Key, Window, WindowOptions};
 use minifb::{KeyRepeat, Scale, ScaleMode};
 use portaudio::DeviceIndex;
@@ -20,8 +23,9 @@ use v4l::video::Capture;
 use websocket::OwnedMessage;
 use websocket::server::{NoTlsAcceptor};
 use websocket::sync::Server as WsServer;
-use remote64_common::Packet;
+use remote64_common::{Capability, Packet};
 use remote64_common::util::InfCell;
+use crate::communication::SocketManager;
 
 
 mod communication;
@@ -37,82 +41,44 @@ pub struct Server {
 }
 
 fn main() {
-    pretty_env_logger::init();
+    // Run clap to parse cli arguments
+    let matches = Command::new("remote64-server")
+        .version(clap::crate_version!())
+        .arg(Arg::new("log-level")
+            .long("log-level")
+            .takes_value(true)
+            .default_value("info")
+            .possible_values(["error", "warn", "info", "debug", "trace"])
+            .help("Specify the console log level. Environment variable 'RUST_LOG' will override this option."))
+        .arg(Arg::new("capabilities")
+            .short('c')
+            .long("cap")
+            .takes_value(true)
+            .multiple_occurrences(true)
+            .possible_values(["LivePlayback", "AudioRecording", "InputHandling"])
+            .help("Specify a capability of this server. Use multiple -c/--cap args to specify multiple capabilities."))
+        .next_line_help(true)
+        .setting(AppSettings::DeriveDisplayOrder)
+        .get_matches();
     
-    let serv = Arc::new(InfCell::new(Server {
-        running: true,
-        socket: WsServer::bind("0.0.0.0:6400").unwrap(),
-        has_client: false,
-    }));
-    serv.get_mut().socket.set_nonblocking(true).unwrap();
+    // Setup program-wide logger format
+    let level = match std::env::var("RUST_LOG").unwrap_or(matches.value_of("log-level").unwrap_or("info").to_owned()).as_str() {
+        "error" => LevelFilter::Error,
+        "warn" => LevelFilter::Warn,
+        "info" => LevelFilter::Info,
+        "debug" => LevelFilter::Debug,
+        "trace" => LevelFilter::Trace,
+        _ => LevelFilter::Info
+    };
+    let mut logbuilder = remote64_common::logger::builder();
+    logbuilder.filter_level(level);
+    logbuilder.init();
     
-    let (img_send, img_recv) = bounded(1);
+    // Collect capabilities from cli arguments
+    let capabilities: Vec<Capability> = matches.values_of("capabilities").unwrap_or_default().map(|cap| Capability::from_str(cap).unwrap_or_default()).collect();
     
-    let serv_arc = serv.clone();
-    std::thread::spawn(move || {
-        let serv_copy = serv_arc.get_mut();
-        while serv_copy.running {
-            loop {
-                let next = serv_copy.socket.next();
-                if next.is_none() { break; }
-                
-                let next = next.unwrap();
-                if next.is_ok() {
-                    let request = next.unwrap();
-                    
-                    let img_recv = img_recv.clone();
-                    let serv_copy = serv_arc.get_mut();
-                    serv_copy.has_client = true;
-                    std::thread::spawn(move || {
-                        let client = request.accept().unwrap();
-                        println!("New connection from: {}", client.peer_addr().unwrap());
-                        let (mut receiver, mut sender) = client.split().unwrap();
-                        
-                        let mut client_ready = false;
-                        loop {
-                            match receiver.recv_message() {
-                                Ok(msg) => match msg {
-                                    OwnedMessage::Binary(data) => {
-                                        match Packet::deserialize(&data).unwrap() {
-                                            Packet::ImageRequest => {
-                                                client_ready = true;
-                                            }
-                                            _ => ()
-                                        }
-                                    }
-                                    _ => ()
-                                },
-                                Err(_) => ()
-                            }
-                            
-                            match img_recv.recv() {
-                                Ok(img_buf) => {
-                                    if client_ready {
-                                        match sender.send_message(&OwnedMessage::Binary(img_buf)) {
-                                            Ok(_) => (),
-                                            Err(err) => {
-                                                println!("Socket Error: {:?}", err);
-                                                serv_copy.has_client = false;
-                                                break;
-                                            }
-                                        }
-                                        client_ready = false;
-                                    }
-                                },
-                                Err(err) => println!("Channel Error: {:?}", err)
-                            }
-                        }
-                    });
-                }
-            }
-            
-            if !serv_copy.has_client {
-                while let Ok(_) = img_recv.try_recv() {}
-            }
-            
-            std::thread::sleep(Duration::from_secs_f32(0.5));
-        }
-    });
+    // Initialize socket manager which handles the client connections and request queue
+    let (image_request, image_sender) = SocketManager::new(capabilities);
     
     
     let mut window_buf: Vec<u32> = vec![0; WIDTH * HEIGHT];
@@ -250,17 +216,19 @@ fn main() {
         
         window.update_with_buffer(&window_buf, WIDTH, HEIGHT).unwrap();
         //img.save(format!("video/output-{:08}.bmp", frame_num)).unwrap();
-        for i in 0..window_buf.len() {
-            let color = window_buf[i];
-            socket_buf[(i * 3) + 0] = ((color & 0xFF0000) >> 16) as u8;
-            socket_buf[(i * 3) + 1] = ((color & 0x00FF00) >> 8) as u8;
-            socket_buf[(i * 3) + 2] = (color & 0x0000FF) as u8;
-        }
-        match img_send.try_send(zstd::encode_all(&*socket_buf, 3).unwrap()) {
-            Ok(_) | Err(_) => ()
-        }
-        //img_send.send(socket_buf.clone()).unwrap();
         frame_num += 1;
+        
+        if image_request.try_recv().is_ok() {
+            for i in 0..window_buf.len() {
+                let color = window_buf[i];
+                socket_buf[(i * 3) + 0] = ((color & 0xFF0000) >> 16) as u8;
+                socket_buf[(i * 3) + 1] = ((color & 0x00FF00) >> 8) as u8;
+                socket_buf[(i * 3) + 2] = (color & 0x0000FF) as u8;
+            }
+            match image_sender.try_send(socket_buf.clone()) {
+                Ok(_) | Err(_) => ()
+            }
+        }
     }
     
     audio_stream.stop().unwrap();

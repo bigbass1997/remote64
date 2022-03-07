@@ -1,7 +1,9 @@
 
+use strum_macros::EnumString;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
 pub mod util;
+pub mod logger;
 
 
 pub const API_INFO: [u8; 6] = [b'R', b'M', b'6', b'4', 0x00, 0x00];
@@ -25,15 +27,22 @@ pub const ID_REQ_DENIED: u8 = 0xFE;
 pub const ID_UNKNOWN: u8 = 0xFF;
 
 
-#[derive(Copy, Clone, Debug, PartialEq, FromPrimitive, IntoPrimitive)]
+#[derive(Copy, Clone, Debug, PartialEq, FromPrimitive, IntoPrimitive, EnumString)]
 #[repr(u8)]
 pub enum Capability {
-    LiveImages = 0x01,
-    InputHandling = 0x02,
+    LivePlayback = 0x01,
+    AudioRecording = 0x02,
+    InputHandling = 0x03,
     
     #[num_enum(default)]
     Invalid = 0x00,
 }
+impl Default for Capability {
+    fn default() -> Self {
+        Capability::Invalid
+    }
+}
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerInfo {
@@ -66,6 +75,7 @@ pub enum Packet {
     Unknown(Vec<u8>),
 }
 use Packet::*;
+use crate::Capability::Invalid;
 
 impl Packet {
     pub fn deserialize(data: &[u8]) -> Result<Packet, PacketError> {
@@ -92,7 +102,7 @@ impl Packet {
                 }))
             },
             ID_IMAGE_REQ => Ok(ImageRequest),
-            ID_IMAGE_RES => Ok(ImageResponse(data.to_vec())),
+            ID_IMAGE_RES => Ok(ImageResponse(data[1..].to_vec())),
             
             ID_REQ_DENIED => Ok(RequestDenied),
             _ => Ok(Unknown(data.to_vec()))
@@ -119,12 +129,12 @@ impl Packet {
             Ping => (),
             Pong => (),
             InfoRequest => (),
-            InfoResponse(info) => raw.copy_from_slice(&info.serialize()),
+            InfoResponse(info) => raw.extend_from_slice(&info.serialize()),
             ImageRequest => (),
-            ImageResponse(data) => raw.copy_from_slice(&data),
+            ImageResponse(data) => raw.extend_from_slice(&data),
             
             RequestDenied => (),
-            Unknown(data) => raw.copy_from_slice(&data),
+            Unknown(data) => raw.extend_from_slice(&data),
         }
         
         raw
