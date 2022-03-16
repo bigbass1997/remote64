@@ -1,6 +1,9 @@
 /target
 /out
 /*.iml
+/*/*.iml
 /.idea
+/.stignore
+/.stfolder
 /*.wav
 /video
