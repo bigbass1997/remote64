@@ -1,0 +1,9 @@
+/firmware/build/
+/firmware/debug/
+/firmware/disassembly/
+/firmware/dist/
+/firmware/nbproject/
+
+/~$*
+
+/hardware/remote64-controller-backups/
