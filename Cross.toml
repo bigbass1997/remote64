@@ -1,3 +1,7 @@
 
+
 [target.x86_64-unknown-linux-gnu]
-image = "my-image:tag"
+image = "remote64-image-linux:tag"
+
+[target.x86_64-pc-windows-gnu]
+image = "remote64-image-windows:tag"
