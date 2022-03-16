@@ -2,14 +2,13 @@
 extern crate env_logger;
 #[macro_use] extern crate log;
 
+use std::ops::DerefMut;
 use std::str::FromStr;
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use clap::{AppSettings, Arg, Command};
-use crossbeam_channel::{bounded, unbounded};
 use hound::WavWriter;
-use image::{ImageFormat, RgbImage};
+use image::RgbImage;
 use log::LevelFilter;
 use minifb::{Key, Window, WindowOptions};
 use minifb::{KeyRepeat, Scale, ScaleMode};
@@ -20,25 +19,18 @@ use v4l::format::{Colorspace, FieldOrder};
 use v4l::io::mmap::Stream;
 use v4l::io::traits::OutputStream;
 use v4l::video::Capture;
-use websocket::OwnedMessage;
-use websocket::server::{NoTlsAcceptor};
-use websocket::sync::Server as WsServer;
-use remote64_common::{Capability, Packet};
+use remote64_common::Capability;
+use remote64_common::Packet::{AudioSamples, ImageResponse};
 use remote64_common::util::InfCell;
 use crate::communication::SocketManager;
 
 
 mod communication;
+mod video;
 
 
 const WIDTH: usize = 720;
 const HEIGHT: usize = 480;
-
-pub struct Server {
-    pub socket: WsServer<NoTlsAcceptor>,
-    running: bool,
-    pub has_client: bool,
-}
 
 fn main() {
     // Run clap to parse cli arguments
@@ -70,15 +62,17 @@ fn main() {
         "trace" => LevelFilter::Trace,
         _ => LevelFilter::Info
     };
-    let mut logbuilder = remote64_common::logger::builder();
-    logbuilder.filter_level(level);
-    logbuilder.init();
+    {
+        let mut logbuilder = remote64_common::logger::builder();
+        logbuilder.filter_level(level);
+        logbuilder.init();
+    }
     
     // Collect capabilities from cli arguments
     let capabilities: Vec<Capability> = matches.values_of("capabilities").unwrap_or_default().map(|cap| Capability::from_str(cap).unwrap_or_default()).collect();
     
     // Initialize socket manager which handles the client connections and request queue
-    let (image_request, image_sender) = SocketManager::new(capabilities);
+    let sm_channel = SocketManager::new(capabilities);
     
     
     
@@ -96,31 +90,6 @@ fn main() {
     }).unwrap();
     
     window.limit_update_rate(Some(Duration::from_secs_f32(1.0/60.0)));
-    
-    let mut dev = Device::new(0).unwrap();
-    let mut sharp_val = 0;
-    let mut sharp_control_id = 0;
-    for control in dev.query_controls().unwrap() {
-        if control.name == "Sharpness" {
-            sharp_control_id = control.id;
-            sharp_val = match dev.control(control.id).unwrap() {
-                Control::Value(val) => val,
-                _ => 0,
-            };
-        }
-        
-        if control.name == "Mute" {
-            dev.set_control(control.id, Control::Value(0)).unwrap();
-        }
-    }
-    
-    let mut fmt = dev.format().unwrap();
-    fmt.width = WIDTH as u32;
-    fmt.height = HEIGHT as u32;
-    fmt.fourcc = FourCC::new(b"RGBP");
-    fmt.colorspace = Colorspace::NTSC;
-    fmt.field_order = FieldOrder::Alternate;
-    dev.set_format(&fmt).unwrap();
     
     
     
@@ -151,7 +120,9 @@ fn main() {
     
     let mut wav_writer = get_wav_writer("recorded.wav", 2, 44100.0).unwrap();
     
-    
+    let sm_channel_audio = sm_channel.send.clone();
+    let samples = InfCell::new(Vec::with_capacity(512 * 18));
+    let callback_samples = samples.get_mut();
     let callback = move |portaudio::stream::DuplexCallbackArgs {
                              in_buffer,
                              out_buffer,
@@ -160,11 +131,18 @@ fn main() {
                              time: _,
                          }| {
         if !flags.is_empty() {
-            println!("flags: {:?}", flags);
+            debug!("flags: {:?}", flags);
         }
         
         for (output_sample, input_sample) in out_buffer.iter_mut().zip(in_buffer.iter()) {
             *output_sample = *input_sample;
+            
+            callback_samples.push(*input_sample);
+            if callback_samples.len() >= 512 * 18 {
+                sm_channel_audio.try_send(AudioSamples(callback_samples.clone())).unwrap_or_default();
+                callback_samples.clear();
+            }
+            
             wav_writer.write_sample(*input_sample).unwrap();
         }
         
@@ -177,6 +155,31 @@ fn main() {
     
     
     let mut img = RgbImage::new(WIDTH as u32, HEIGHT as u32);
+    
+    let mut dev = Device::new(0).unwrap();
+    let mut sharp_val = 0;
+    let mut sharp_control_id = 0;
+    for control in dev.query_controls().unwrap() {
+        if control.name == "Sharpness" {
+            sharp_control_id = control.id;
+            sharp_val = match dev.control(control.id).unwrap() {
+                Control::Value(val) => val,
+                _ => 0,
+            };
+        }
+        
+        if control.name == "Mute" {
+            dev.set_control(control.id, Control::Value(0)).unwrap();
+        }
+    }
+    
+    let mut fmt = dev.format().unwrap();
+    fmt.width = WIDTH as u32;
+    fmt.height = HEIGHT as u32;
+    fmt.fourcc = FourCC::new(b"RGBP");
+    fmt.colorspace = Colorspace::NTSC;
+    fmt.field_order = FieldOrder::Alternate;
+    dev.set_format(&fmt).unwrap();
     
     let mut stream = Stream::with_buffers(&mut dev, Type::VideoCapture, 4).unwrap();
     stream.next().unwrap(); // first frame is always black?
@@ -220,16 +223,14 @@ fn main() {
         //img.save(format!("video/output-{:08}.bmp", frame_num)).unwrap();
         frame_num += 1;
         
-        if image_request.try_recv().is_ok() {
-            for i in 0..window_buf.len() {
-                let color = window_buf[i];
-                socket_buf[(i * 3) + 0] = ((color & 0xFF0000) >> 16) as u8;
-                socket_buf[(i * 3) + 1] = ((color & 0x00FF00) >> 8) as u8;
-                socket_buf[(i * 3) + 2] = (color & 0x0000FF) as u8;
-            }
-            match image_sender.try_send(socket_buf.clone()) {
-                Ok(_) | Err(_) => ()
-            }
+        for i in 0..window_buf.len() {
+            let color = window_buf[i];
+            socket_buf[(i * 3) + 0] = ((color & 0xFF0000) >> 16) as u8;
+            socket_buf[(i * 3) + 1] = ((color & 0x00FF00) >> 8) as u8;
+            socket_buf[(i * 3) + 2] = (color & 0x0000FF) as u8;
+        }
+        match sm_channel.send.try_send(ImageResponse(socket_buf.clone())) {
+            Ok(_) | Err(_) => ()
         }
     }
     

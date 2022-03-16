@@ -25,6 +25,7 @@ pub const ID_QUEUE_REQ: u8 = 0x05;
 pub const ID_QUEUE_RES: u8 = 0x06;
 pub const ID_IMAGE_REQ: u8 = 0x07;
 pub const ID_IMAGE_RES: u8 = 0x08;
+pub const ID_AUDIO_SAMPLE: u8 = 0x09;
 pub const ID_REQ_DENIED: u8 = 0xFE;
 pub const ID_UNKNOWN: u8 = 0xFF;
 
@@ -73,8 +74,9 @@ pub enum Packet {
     InfoResponse(ServerInfo),
     QueueRequest,
     QueueResponse(u32),
-    ImageRequest,
-    ImageResponse(Vec<u8>),
+    ImageRequest, //TODO: Add image formatting and options to request (allow client to specify lower resolutions or lossy quality)
+    ImageResponse(Vec<u8>), //TODO: Add image datastructure to convey format of image (necessary once resolution/lossy options are implemented)
+    AudioSamples(Vec<f32>),
     RequestDenied,
     Unknown(Vec<u8>),
 }
@@ -112,6 +114,16 @@ impl Packet {
             },
             ID_IMAGE_REQ => Ok(ImageRequest),
             ID_IMAGE_RES => Ok(ImageResponse(data[1..].to_vec())),
+            ID_AUDIO_SAMPLE => {
+                if (data.len() - 1) % 4 != 0 { return Err(UnexpectedLength) }
+                
+                let mut samples = vec![];
+                for i in (1..data.len()).step_by(4) {
+                    samples.push(f32::from_be_bytes([data[i + 0], data[i + 1], data[i + 2], data[i + 3]]));
+                }
+                
+                Ok(AudioSamples(samples))
+            },
             
             ID_REQ_DENIED => Ok(RequestDenied),
             _ => Ok(Unknown(data.to_vec()))
@@ -128,6 +140,7 @@ impl Packet {
             QueueResponse(_) => ID_QUEUE_RES,
             ImageRequest => ID_IMAGE_REQ,
             ImageResponse(_) => ID_IMAGE_RES,
+            AudioSamples(_) => ID_AUDIO_SAMPLE,
             
             RequestDenied => ID_REQ_DENIED,
             Unknown(_) => ID_UNKNOWN
@@ -145,6 +158,11 @@ impl Packet {
             QueueResponse(data) => raw.extend_from_slice(&data.to_be_bytes()),
             ImageRequest => (),
             ImageResponse(data) => raw.extend_from_slice(&data),
+            AudioSamples(data) => {
+                for sample in data {
+                    raw.extend_from_slice(&sample.to_be_bytes());
+                }
+            },
             
             RequestDenied => (),
             Unknown(data) => raw.extend_from_slice(&data),

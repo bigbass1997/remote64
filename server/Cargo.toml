@@ -12,6 +12,7 @@ env_logger = "0.9"
 clap = { version = "3.1", features = ["cargo", "env"] }
 crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
+crossbeam-utils = "0.8"
 zstd = "*"
 
 minifb = "0.20"

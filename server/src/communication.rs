@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender, unbounded};
 use websocket::OwnedMessage;
 use websocket::server::NoTlsAcceptor;
 use websocket::sync::{Client, Server};
@@ -12,6 +12,44 @@ pub const INFO_VERSION: u16 = 0x0000;
 
 type WsClient = Client<TcpStream>;
 type WsServer = Server<NoTlsAcceptor>;
+
+
+
+/// A channel for sending and receiving messages with another TwoWayChannel.
+/// 
+/// Say you have two channels: A and B.
+/// The type of data flowing from A to B, can be different than the type flowing from B to A, using generics.
+#[derive(Clone, Debug)]
+pub struct TwoWayChannel<A, B> {
+    pub send: Sender<A>,
+    pub recv: Receiver<B>,
+}
+impl<A, B> TwoWayChannel<A, B> {
+    /// Creates both endpoints of the channel.
+    /// 
+    /// The sender of one endpoint, will send messages to the receiver of the other.
+    pub fn new(bound: Option<usize>) -> (TwoWayChannel<A, B>, TwoWayChannel<B, A>) {
+        let chan1 = match bound {
+            Some(bound) => bounded(bound),
+            None => unbounded()
+        };
+        let chan2 = match bound {
+            Some(bound) => bounded(bound),
+            None => unbounded()
+        };
+        
+        (
+            TwoWayChannel {
+                send: chan1.0,
+                recv: chan2.1,
+            },
+            TwoWayChannel {
+                send: chan2.0,
+                recv: chan1.1,
+            }
+        )
+    }
+}
 
 
 
@@ -43,19 +81,19 @@ impl SocketClient {
 pub struct SocketManager {
     socket: WsServer,
     client_queue: VecDeque<SocketClient>,
+    last_frame: Vec<u8>,
+    last_frame_stale: bool,
 }
 
 impl SocketManager {
-    pub fn new(capabilities: Vec<Capability>) -> (Receiver<()>, Sender<Vec<u8>>) {
+    pub fn new(capabilities: Vec<Capability>) -> TwoWayChannel<Packet, Packet> {
         let server_info = ServerInfo {
             header: INFO_HEADER,
             version: INFO_VERSION,
             capabilities
         };
         
-        let (request_image_send, request_image_recv) = bounded(1);
-        let (image_response_send, image_response_recv) = bounded::<Vec<u8>>(1); // TODO: Change this to a channel of Packets instead of just images
-        
+        let (chan_owned, chan_other) = TwoWayChannel::<Packet, Packet>::new(None);
         
         let socket = WsServer::bind("0.0.0.0:6400").unwrap();
         socket.set_nonblocking(true).unwrap();
@@ -63,6 +101,8 @@ impl SocketManager {
         let mut sm = SocketManager {
             socket,
             client_queue: VecDeque::new(),
+            last_frame: Default::default(),
+            last_frame_stale: true,
         };
         
         std::thread::Builder::new().name("SocketManager".to_owned()).spawn(move || {
@@ -121,11 +161,11 @@ impl SocketManager {
                                     
                                     ImageRequest if i == 0 => { // if client is at front of queue
                                         client.requesting_image = true;
-                                        request_image_send.try_send(()).unwrap_or_default()
+                                        chan_owned.send.try_send(packet).unwrap_or_default()
                                     }
                                     ImageRequest => send_packet(client, RequestDenied),
                                     
-                                    InfoResponse(_) | QueueResponse(_) | ImageResponse(_) | RequestDenied | Unknown(_) => (),
+                                    InfoResponse(_) | QueueResponse(_) | ImageResponse(_) | AudioSamples(_) | RequestDenied | Unknown(_) => (),
                                 }
                             },
                             _ => ()
@@ -142,16 +182,15 @@ impl SocketManager {
                         }
                         
                         
-                        if client.requesting_image {
-                            if let Ok(image) = image_response_recv.try_recv() {
-                                match zstd::encode_all(image.as_slice(), 3) {
-                                    Ok(data) => {
-                                        send_packet(client, ImageResponse(data));
-                                    },
-                                    Err(err) => warn!("Failed to compress image data: {:?}", err)
-                                }
-                                client.requesting_image = false;
+                        if client.requesting_image && !sm.last_frame_stale {
+                            match zstd::encode_all(sm.last_frame.as_slice(), 3) {
+                                Ok(data) => {
+                                    send_packet(client, ImageResponse(data));
+                                },
+                                Err(err) => warn!("Failed to compress image data: {:?}", err)
                             }
+                            client.requesting_image = false;
+                            sm.last_frame_stale = true;
                         }
                     }
                 }
@@ -159,10 +198,27 @@ impl SocketManager {
                 for i in disconnects.iter().rev() {
                     sm.client_queue.remove(*i);
                 }
+                
+                // Process any internally created packets, provided to the socket manager
+                while let Ok(packet) = chan_owned.recv.try_recv() {
+                    match packet {
+                        ImageResponse(img) => { // Update internal state with latest image
+                            sm.last_frame = img;
+                            sm.last_frame_stale = false;
+                        },
+                        AudioSamples(samples) => {
+                            if let Some(socket) = sm.client_queue.front_mut() {
+                                debug!("Send_packet {} samples.", samples.len());
+                                send_packet(socket, AudioSamples(samples));
+                            }
+                        }
+                        _ => ()
+                    }
+                }
             }
         }).unwrap();
         
-        (request_image_recv, image_response_send)
+        chan_other
     }
 }
 

@@ -5,9 +5,13 @@ edition = "2021"
 
 [dependencies]
 remote64-common = { path = "../common" }
-websocket = { version = "0.26", default-features = false, features = ["sync"] }
+websocket = { version = "0.26", default-features = false, features = ["sync", "sync-ssl"] }
 
-clap = "3.1"
+log = "0.4"
+env_logger = "0.9"
+clap = { version = "3.1", features = ["cargo", "env"] }
 zstd = "*"
 
 minifb = "0.20"
+portaudio = "0.7"
+crossbeam-queue = "0.3"

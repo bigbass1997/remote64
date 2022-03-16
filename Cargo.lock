@@ -1311,7 +1311,11 @@ name = "remote64-client"
 version = "0.1.0"
 dependencies = [
  "clap 3.1.3",
+ "crossbeam-queue",
+ "env_logger 0.9.0",
+ "log 0.4.14",
  "minifb",
+ "portaudio",
  "remote64-common",
  "websocket",
  "zstd",
@@ -1336,6 +1340,7 @@ dependencies = [
  "clap 3.1.3",
  "crossbeam-channel",
  "crossbeam-queue",
+ "crossbeam-utils",
  "env_logger 0.9.0",
  "hound",
  "image",
