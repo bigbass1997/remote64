@@ -16,7 +16,7 @@ const HEIGHT: usize = 480;
 
 fn main() {
     // Run clap to parse cli arguments
-    let matches = Command::new("remote64-server")
+    let matches = Command::new("remote64-client")
         .version(clap::crate_version!())
         .arg(Arg::new("log-level")
             .long("log-level")
