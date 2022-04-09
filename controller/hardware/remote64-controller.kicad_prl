@@ -70,19 +70,6 @@
     "version": 3
   },
   "project": {
-    "files": [
-      {
-        "name": "remote64-controller.kicad_pcb",
-        "open": false,
-        "window": {
-          "display": 0,
-          "maximized": true,
-          "pos_x": 1826,
-          "pos_y": 0,
-          "size_x": 1280,
-          "size_y": 648
-        }
-      }
-    ]
+    "files": []
   }
 }
