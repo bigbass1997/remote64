@@ -1,11 +1,12 @@
-use std::collections::VecDeque;
+use std::collections::vec_deque::VecDeque;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 use websocket::OwnedMessage;
 use websocket::server::NoTlsAcceptor;
 use websocket::sync::{Client, Server};
-use remote64_common::{Capability, Packet, Packet::*, ServerInfo};
-use crate::intercom::BidirectionalChannel;
+use remote64_common::{Feature, Packet, Packet::*, ServerInfo};
+use crate::intercom::Endpoint;
+use crate::InterMessage;
 
 pub const INFO_HEADER: [u8; 4] = [0x52, 0x4D, 0x36, 0x34]; // RM64
 pub const INFO_VERSION: u16 = 0x0000;
@@ -21,6 +22,7 @@ pub struct SocketClient {
     last_ping: Instant,
     last_pong: Instant,
     requesting_image: bool,
+    waiting: bool,
 }
 impl SocketClient {
     pub fn new(socket: WsClient) -> Self { Self {
@@ -28,6 +30,7 @@ impl SocketClient {
         last_ping: Instant::now(),
         last_pong: Instant::now(),
         requesting_image: false,
+        waiting: true,
     }}
 }
 
@@ -48,14 +51,12 @@ pub struct SocketManager {
 }
 
 impl SocketManager {
-    pub fn new(capabilities: Vec<Capability>) -> BidirectionalChannel<Packet, Packet> {
+    pub fn init(features: Vec<Feature>, endpoint: Endpoint) {
         let server_info = ServerInfo {
             header: INFO_HEADER,
             version: INFO_VERSION,
-            capabilities
+            features,
         };
-        
-        let (chan_owned, chan_other) = BidirectionalChannel::<Packet, Packet>::new(None);
         
         let socket = WsServer::bind("0.0.0.0:6400").unwrap();
         socket.set_nonblocking(true).unwrap();
@@ -122,8 +123,13 @@ impl SocketManager {
                                     },
                                     
                                     ImageRequest if i == 0 => { // if client is at front of queue
+                                        if client.waiting {
+                                            client.waiting = false;
+                                            endpoint.send.try_send(InterMessage::StartRecording).unwrap_or_default();
+                                        }
+                                        
                                         client.requesting_image = true;
-                                        chan_owned.send.try_send(packet).unwrap_or_default()
+                                        endpoint.send.try_send(InterMessage::SocketPacket(packet)).unwrap_or_default()
                                     }
                                     ImageRequest => send_packet(client, RequestDenied),
                                     
@@ -158,29 +164,35 @@ impl SocketManager {
                 }
                 disconnects.sort();
                 for i in disconnects.iter().rev() {
+                    if !sm.client_queue[*i].waiting {
+                        endpoint.send.try_send(InterMessage::StopRecording).unwrap_or_default();
+                    }
                     sm.client_queue.remove(*i);
                 }
                 
-                // Process any internally created packets, provided to the socket manager
-                while let Ok(packet) = chan_owned.recv.try_recv() {
-                    match packet {
-                        ImageResponse(img) => { // Update internal state with latest image
-                            sm.last_frame = img;
-                            sm.last_frame_stale = false;
+                // Process any internally created messages, provided to the socket manager
+                while let Ok(msg) = endpoint.recv.try_recv() {
+                    match msg {
+                        InterMessage::SocketPacket(packet) => match packet {
+                            ImageResponse(img) => { // Update internal state with latest image
+                                sm.last_frame = img;
+                                sm.last_frame_stale = false;
+                            },
+                            AudioSamples(samples) => {
+                                if let Some(socket) = sm.client_queue.front_mut() {
+                                    debug!("Send_packet {} samples.", samples.len());
+                                    send_packet(socket, AudioSamples(samples));
+                                }
+                            },
+                            _ => ()
                         },
-                        AudioSamples(samples) => {
-                            if let Some(socket) = sm.client_queue.front_mut() {
-                                debug!("Send_packet {} samples.", samples.len());
-                                send_packet(socket, AudioSamples(samples));
-                            }
-                        }
                         _ => ()
                     }
                 }
+                
+                std::thread::sleep(Duration::from_nanos(1));
             }
         }).unwrap();
-        
-        chan_other
     }
 }
 

@@ -32,7 +32,7 @@ pub const ID_UNKNOWN: u8 = 0xFF;
 
 #[derive(Copy, Clone, Debug, PartialEq, FromPrimitive, IntoPrimitive, EnumString)]
 #[repr(u8)]
-pub enum Capability {
+pub enum Feature {
     LivePlayback = 0x01,
     AudioRecording = 0x02,
     InputHandling = 0x03,
@@ -40,9 +40,9 @@ pub enum Capability {
     #[num_enum(default)]
     Invalid = 0x00,
 }
-impl Default for Capability {
+impl Default for Feature {
     fn default() -> Self {
-        Capability::Invalid
+        Feature::Invalid
     }
 }
 
@@ -51,15 +51,15 @@ impl Default for Capability {
 pub struct ServerInfo {
     pub header: [u8; 4],
     pub version: u16,
-    pub capabilities: Vec<Capability>,
+    pub features: Vec<Feature>,
 }
 impl ServerInfo {
     pub fn serialize(&self) -> Vec<u8> {
         let mut raw = vec![];
         raw.copy_from_slice(&self.header);
         raw.copy_from_slice(&self.version.to_be_bytes());
-        for cap in &self.capabilities {
-            raw.push((*cap).into());
+        for feat in &self.features {
+            raw.push((*feat).into());
         }
         
         raw
@@ -93,17 +93,17 @@ impl Packet {
             ID_INFO_RES => {
                 if data.len() < 7 { return Err(UnexpectedLength) }
                 
-                let mut capabilities = vec![];
+                let mut features = vec![];
                 if data.len() > 7 {
                     for i in 7..data.len() {
-                        capabilities.push(Capability::from(data[i]));
+                        features.push(Feature::from(data[i]));
                     }
                 }
                 
                 Ok(InfoResponse(ServerInfo {
                     header: [data[1], data[2], data[3], data[4]],
                     version: u16::from_be_bytes([data[5], data[6]]),
-                    capabilities,
+                    features,
                 }))
             },
             ID_QUEUE_REQ => Ok(QueueRequest),

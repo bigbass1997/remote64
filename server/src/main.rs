@@ -2,27 +2,18 @@
 extern crate env_logger;
 #[macro_use] extern crate log;
 
-use std::ops::DerefMut;
-use std::process::exit;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 use clap::{AppSettings, Arg, Command};
-use hound::WavWriter;
-use image::RgbImage;
 use log::LevelFilter;
 use minifb::{Key, Window, WindowOptions};
-use minifb::{KeyRepeat, Scale, ScaleMode};
+use minifb::{Scale, ScaleMode};
 use portaudio::DeviceIndex;
-use v4l::{Control, Device, FourCC};
-use v4l::buffer::Type;
-use v4l::format::{Colorspace, FieldOrder};
-use v4l::io::mmap::Stream;
 use v4l::io::traits::OutputStream;
-use v4l::video::Capture;
-use remote64_common::Capability;
+use remote64_common::Feature;
 use remote64_common::Packet::{AudioSamples, ImageResponse};
 use remote64_common::util::InfCell;
+use crate::intercom::{BroadcastNetwork, InterMessage};
 use crate::sockets::SocketManager;
 use crate::recording::Recording;
 use crate::video::VideoStream;
@@ -41,25 +32,27 @@ fn main() {
     // Run clap to parse cli arguments
     let matches = Command::new("remote64-server")
         .version(clap::crate_version!())
-        .arg(Arg::new("log-level")
-            .long("log-level")
+        .arg(Arg::new("verbose")
+            .short('v')
+            .long("verbose")
             .takes_value(true)
+            .default_missing_value("debug")
             .default_value("info")
             .possible_values(["error", "warn", "info", "debug", "trace"])
             .help("Specify the console log level. Environment variable 'RUST_LOG' will override this option."))
-        .arg(Arg::new("capabilities")
-            .short('c')
-            .long("cap")
+        .arg(Arg::new("features")
+            .short('f')
+            .long("feature")
             .takes_value(true)
             .multiple_occurrences(true)
             .possible_values(["LivePlayback", "AudioRecording", "InputHandling"])
-            .help("Specify a capability of this server. Use multiple -c/--cap args to specify multiple capabilities."))
+            .help("Specify a feature supported by this server. Use multiple -f/--feature args to specify multiple features."))
         .next_line_help(true)
         .setting(AppSettings::DeriveDisplayOrder)
         .get_matches();
     
     // Setup program-wide logger format
-    let level = match std::env::var("RUST_LOG").unwrap_or(matches.value_of("log-level").unwrap_or("info").to_owned()).as_str() {
+    let level = match std::env::var("RUST_LOG").unwrap_or(matches.value_of("verbose").unwrap_or("info").to_owned()).as_str() {
         "error" => LevelFilter::Error,
         "warn" => LevelFilter::Warn,
         "info" => LevelFilter::Info,
@@ -73,11 +66,13 @@ fn main() {
         logbuilder.init();
     }
     
-    // Collect capabilities from cli arguments
-    let capabilities: Vec<Capability> = matches.values_of("capabilities").unwrap_or_default().map(|cap| Capability::from_str(cap).unwrap_or_default()).collect();
+    // Collect features from cli arguments
+    let features: Vec<Feature> = matches.values_of("features").unwrap_or_default().map(|feat| Feature::from_str(feat).unwrap_or_default()).collect();
+    
+    let mut intercom = BroadcastNetwork::<InterMessage>::new();
     
     // Initialize socket manager which handles the client connections and request queue
-    let sm_channel = SocketManager::new(capabilities);
+    SocketManager::init(features, intercom.endpoint());
     
     
     
@@ -124,14 +119,34 @@ fn main() {
     let settings = portaudio::DuplexStreamSettings::new(input_params, output_params, 44100.0, 512);
     
     let recording = InfCell::new(Recording::new(WIDTH as u32, HEIGHT as u32));
-    //recording.get_mut().start();
     let audio_recording = recording.get_mut();
     let video_recording = recording.get_mut();
     for _ in 0..15 {
         video_recording.frame(); // delay video by 15 frames to better sync with audio recording
     }
     
-    let sm_channel_audio = sm_channel.send.clone();
+    let manage_recording = recording.get_mut();
+    let recording_endpoint = intercom.endpoint();
+    std::thread::spawn(move || {
+        while let Ok(msg) = recording_endpoint.recv.recv() {
+            match msg {
+                InterMessage::StartRecording => {
+                    info!("Recording started.");
+                    manage_recording.start();
+                },
+                InterMessage::StopRecording => {
+                    info!("Recording ended.");
+                    manage_recording.end();
+                },
+                _ => ()
+            }
+        }
+        info!("Recording endpoint died.");
+    });
+    
+    
+    let audio_endpoint = intercom.endpoint();
+    drop(audio_endpoint.recv);
     let samples = InfCell::new(Vec::with_capacity(512 * 18));
     let callback_samples = samples.get_mut();
     let callback = move |portaudio::stream::DuplexCallbackArgs {
@@ -150,7 +165,7 @@ fn main() {
             
             callback_samples.push(*input_sample);
             if callback_samples.len() >= 512 * 18 {
-                sm_channel_audio.try_send(AudioSamples(callback_samples.clone())).unwrap_or_default();
+                audio_endpoint.send.try_send(InterMessage::SocketPacket(AudioSamples(callback_samples.clone()))).unwrap_or_default();
                 callback_samples.clear();
             }
             
@@ -167,6 +182,12 @@ fn main() {
     
     
     
+    
+    let video_endpoint = intercom.endpoint();
+    drop(video_endpoint.recv);
+    std::thread::spawn(move || {
+        intercom.start();
+    });
     
     let mut video_capture = VideoStream::new().unwrap(); //TODO allow server user to specify which device to use
     
@@ -199,7 +220,7 @@ fn main() {
         window.update_with_buffer(&window_buf, WIDTH, HEIGHT).unwrap();
         video_recording.frame();
         
-        sm_channel.send.try_send(ImageResponse(socket_buf.clone())).unwrap_or_default();
+        video_endpoint.send.try_send(InterMessage::SocketPacket(ImageResponse(socket_buf.clone()))).unwrap_or_default();
     }
     
     audio_stream.stop().unwrap();

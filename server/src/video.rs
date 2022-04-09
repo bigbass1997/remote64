@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use std::path::Path;
 use v4l::{Device, Format, FourCC};
 use v4l::buffer::Type;

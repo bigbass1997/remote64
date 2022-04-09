@@ -1,5 +1,6 @@
 use std::time::Duration;
 use crossbeam_channel::{bounded, Receiver, Sender, unbounded};
+use remote64_common::Packet;
 
 /// A channel for sending and receiving messages with another BidirectionalChannel.
 /// 
@@ -108,3 +109,14 @@ impl<T: Clone> BroadcastNetwork<T> {
         }
     }
 }
+
+
+#[derive(Clone, Debug)]
+pub enum InterMessage {
+    SocketPacket(Packet),
+    StartRecording,
+    StopRecording,
+    
+}
+
+pub type Endpoint = BidirectionalChannel<InterMessage, InterMessage>;
