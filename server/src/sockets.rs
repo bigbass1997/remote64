@@ -79,6 +79,7 @@ impl SocketManager {
                                 Err(err) => warn!("Failed to set client nonblocking: {:?}", err)
                             }
                             info!("Client {} connected.", parse_peer(&client));
+                            client.set_nonblocking(true).unwrap();
                             sm.client_queue.push_back(SocketClient::new(client));
                             
                         },
@@ -94,6 +95,12 @@ impl SocketManager {
                 //     from "non-active" clients will be rejected.
                 let mut disconnects = vec![];
                 for (i, client) in sm.client_queue.iter_mut().enumerate() {
+                    if i == 0 && client.waiting {
+                        client.waiting = false;
+                        endpoint.send.try_send(InterMessage::StartRecording).unwrap_or_default();
+                        info!("Client {} is being serviced now.", parse_peer(&client.socket));
+                    }
+                    
                     while let Ok(msg) = client.socket.recv_message() {
                         match msg {
                             OwnedMessage::Close(_) => {
@@ -122,12 +129,7 @@ impl SocketManager {
                                         client.last_pong = Instant::now()
                                     },
                                     
-                                    ImageRequest if i == 0 => { // if client is at front of queue
-                                        if client.waiting {
-                                            client.waiting = false;
-                                            endpoint.send.try_send(InterMessage::StartRecording).unwrap_or_default();
-                                        }
-                                        
+                                    ImageRequest if !client.waiting => { // if client is at front of queue
                                         client.requesting_image = true;
                                         endpoint.send.try_send(InterMessage::SocketPacket(packet)).unwrap_or_default()
                                     }

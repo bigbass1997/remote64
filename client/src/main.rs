@@ -31,6 +31,9 @@ fn main() {
             .multiple_occurrences(true)
             .possible_values(["LivePlayback", "AudioRecording", "InputHandling"])
             .help("Specify a feature you wish to use if available. Use multiple -f/--feature args to specify multiple features."))
+        .arg(Arg::new("domain")
+            .long("domain")
+            .takes_value(true))
         .next_line_help(true)
         .setting(AppSettings::DeriveDisplayOrder)
         .get_matches();
@@ -72,7 +75,7 @@ fn main() {
     window.limit_update_rate(Some(Duration::from_secs_f32(1.0/30.0)));
     
     info!("Attempting to connect...");
-    let mut socket = websocket::ClientBuilder::new("ws://bigbass1997.com:6400").unwrap().connect_insecure().unwrap();
+    let mut socket = websocket::ClientBuilder::new(&format!("ws://{}:6400", matches.value_of("domain").unwrap_or("bigbass1997.com"))).unwrap().connect_insecure().unwrap();
     info!("Connected!");
     
     std::thread::sleep(Duration::from_secs(1));
@@ -158,6 +161,9 @@ fn main() {
                                 for sample in samples {
                                     sample_queue.push(sample);
                                 }
+                            },
+                            Packet::RequestDenied => {
+                                socket.send_message(&OwnedMessage::Binary(Packet::ImageRequest.serialize())).unwrap();
                             }
                             _ => ()
                         },
