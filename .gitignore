@@ -6,4 +6,5 @@
 /.stignore
 /.stfolder
 /*.wav
-/video
+/*.mp4
+/recording

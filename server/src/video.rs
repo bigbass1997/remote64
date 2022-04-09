@@ -1,12 +1,14 @@
 use std::path::Path;
 use v4l::{Device, Format, FourCC};
+use v4l::buffer::Type;
 use v4l::format::{Colorspace, FieldOrder};
 use v4l::video::Capture;
+use v4l::io::mmap::Stream;
 
 
 pub const SUPPORTED_FOURCC: [[u8; 4]; 1] = [*b"RGBP",];
 
-
+#[derive(Debug)]
 pub enum Error {
     IoError(std::io::Error),
     NoDeviceFound,
@@ -14,10 +16,11 @@ pub enum Error {
 }
 use Error::*;
 
-pub struct VideoStream {
-    dev: Device,
+pub struct VideoStream<'a> {
+    pub dev: Device,
+    pub stream: Stream<'a>,
 }
-impl VideoStream {
+impl<'a> VideoStream<'a> {
     pub fn devices() -> Vec<Device> {
         let mut devices = vec![];
         
@@ -33,16 +36,24 @@ impl VideoStream {
     
     pub fn with_path<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         match Device::with_path(path) {
-            Ok(dev) => Ok(Self {
-                dev,
-            }),
+            Ok(dev) => {
+                let stream = Stream::with_buffers(&dev, Type::VideoCapture, 4).unwrap();
+                
+                Ok(Self {
+                    dev,
+                    stream,
+                })
+            },
             Err(err) => Err(IoError(err))
         }
     }
     
     pub fn with(dev: Device) -> Self {
+        let stream = Stream::with_buffers(&dev, Type::VideoCapture, 4).unwrap();
+        
         Self {
             dev,
+            stream,
         }
     }
     
@@ -54,12 +65,16 @@ impl VideoStream {
         
         let mut dev = devices.remove(0);
         let fmt = init_fmt(&mut dev);
+        debug!("Capture device format:\n{}", fmt);
         if !SUPPORTED_FOURCC.contains(&fmt.fourcc.repr) {
             return Err(NoSupportedColorFormat);
         }
         
+        let stream = Stream::with_buffers(&dev, Type::VideoCapture, 4).unwrap();
+        
         Ok(Self {
-            dev: devices.remove(0),
+            dev,
+            stream,
         })
     }
     
@@ -79,8 +94,6 @@ impl VideoStream {
         self.resize(u32::MAX, u32::MAX)
     }
 }
-
-
 
 fn init_fmt(dev: &mut Device) -> Format {
     let mut fmt = dev.format().unwrap();

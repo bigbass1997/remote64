@@ -1,55 +1,17 @@
 use std::collections::VecDeque;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
-use crossbeam_channel::{bounded, Receiver, Sender, unbounded};
 use websocket::OwnedMessage;
 use websocket::server::NoTlsAcceptor;
 use websocket::sync::{Client, Server};
 use remote64_common::{Capability, Packet, Packet::*, ServerInfo};
+use crate::intercom::BidirectionalChannel;
 
 pub const INFO_HEADER: [u8; 4] = [0x52, 0x4D, 0x36, 0x34]; // RM64
 pub const INFO_VERSION: u16 = 0x0000;
 
 type WsClient = Client<TcpStream>;
 type WsServer = Server<NoTlsAcceptor>;
-
-
-
-/// A channel for sending and receiving messages with another TwoWayChannel.
-/// 
-/// Say you have two channels: A and B.
-/// The type of data flowing from A to B, can be different than the type flowing from B to A, using generics.
-#[derive(Clone, Debug)]
-pub struct TwoWayChannel<A, B> {
-    pub send: Sender<A>,
-    pub recv: Receiver<B>,
-}
-impl<A, B> TwoWayChannel<A, B> {
-    /// Creates both endpoints of the channel.
-    /// 
-    /// The sender of one endpoint, will send messages to the receiver of the other.
-    pub fn new(bound: Option<usize>) -> (TwoWayChannel<A, B>, TwoWayChannel<B, A>) {
-        let chan1 = match bound {
-            Some(bound) => bounded(bound),
-            None => unbounded()
-        };
-        let chan2 = match bound {
-            Some(bound) => bounded(bound),
-            None => unbounded()
-        };
-        
-        (
-            TwoWayChannel {
-                send: chan1.0,
-                recv: chan2.1,
-            },
-            TwoWayChannel {
-                send: chan2.0,
-                recv: chan1.1,
-            }
-        )
-    }
-}
 
 
 
@@ -86,14 +48,14 @@ pub struct SocketManager {
 }
 
 impl SocketManager {
-    pub fn new(capabilities: Vec<Capability>) -> TwoWayChannel<Packet, Packet> {
+    pub fn new(capabilities: Vec<Capability>) -> BidirectionalChannel<Packet, Packet> {
         let server_info = ServerInfo {
             header: INFO_HEADER,
             version: INFO_VERSION,
             capabilities
         };
         
-        let (chan_owned, chan_other) = TwoWayChannel::<Packet, Packet>::new(None);
+        let (chan_owned, chan_other) = BidirectionalChannel::<Packet, Packet>::new(None);
         
         let socket = WsServer::bind("0.0.0.0:6400").unwrap();
         socket.set_nonblocking(true).unwrap();

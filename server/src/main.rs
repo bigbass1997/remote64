@@ -3,6 +3,7 @@ extern crate env_logger;
 #[macro_use] extern crate log;
 
 use std::ops::DerefMut;
+use std::process::exit;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,10 +23,14 @@ use v4l::video::Capture;
 use remote64_common::Capability;
 use remote64_common::Packet::{AudioSamples, ImageResponse};
 use remote64_common::util::InfCell;
-use crate::communication::SocketManager;
+use crate::sockets::SocketManager;
+use crate::recording::Recording;
+use crate::video::VideoStream;
 
 
-mod communication;
+mod sockets;
+mod intercom;
+mod recording;
 mod video;
 
 
@@ -118,7 +123,13 @@ fn main() {
     
     let settings = portaudio::DuplexStreamSettings::new(input_params, output_params, 44100.0, 512);
     
-    let mut wav_writer = get_wav_writer("recorded.wav", 2, 44100.0).unwrap();
+    let recording = InfCell::new(Recording::new(WIDTH as u32, HEIGHT as u32));
+    //recording.get_mut().start();
+    let audio_recording = recording.get_mut();
+    let video_recording = recording.get_mut();
+    for _ in 0..15 {
+        video_recording.frame(); // delay video by 15 frames to better sync with audio recording
+    }
     
     let sm_channel_audio = sm_channel.send.clone();
     let samples = InfCell::new(Vec::with_capacity(512 * 18));
@@ -143,7 +154,9 @@ fn main() {
                 callback_samples.clear();
             }
             
-            wav_writer.write_sample(*input_sample).unwrap();
+            if audio_recording.started() {
+                audio_recording.sample(*input_sample);
+            }
         }
         
         portaudio::Continue
@@ -154,103 +167,42 @@ fn main() {
     
     
     
-    let mut img = RgbImage::new(WIDTH as u32, HEIGHT as u32);
     
-    let mut dev = Device::new(0).unwrap();
-    let mut sharp_val = 0;
-    let mut sharp_control_id = 0;
-    for control in dev.query_controls().unwrap() {
-        if control.name == "Sharpness" {
-            sharp_control_id = control.id;
-            sharp_val = match dev.control(control.id).unwrap() {
-                Control::Value(val) => val,
-                _ => 0,
-            };
-        }
-        
-        if control.name == "Mute" {
-            dev.set_control(control.id, Control::Value(0)).unwrap();
-        }
-    }
-    
-    let mut fmt = dev.format().unwrap();
-    fmt.width = WIDTH as u32;
-    fmt.height = HEIGHT as u32;
-    fmt.fourcc = FourCC::new(b"RGBP");
-    fmt.colorspace = Colorspace::NTSC;
-    fmt.field_order = FieldOrder::Alternate;
-    dev.set_format(&fmt).unwrap();
-    
-    let mut stream = Stream::with_buffers(&mut dev, Type::VideoCapture, 4).unwrap();
-    stream.next().unwrap(); // first frame is always black?
-    stream.next().unwrap(); // first frame is always black?
+    let mut video_capture = VideoStream::new().unwrap(); //TODO allow server user to specify which device to use
     
     window_buf.fill(0);
-    let mut frame_num = 0usize;
     let mut socket_buf = vec![0; window_buf.len() * 3];
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        let (stream_buf, _meta) = stream.next().unwrap(); // blocks until next frame, thus may limit FPS
+        let (stream_buf, _meta) = video_capture.stream.next().unwrap(); // blocks until next frame, thus may limit FPS
         
-        if window.is_key_pressed(Key::Right, KeyRepeat::No) {
-            sharp_val += 1;
-            if sharp_val > 15 { sharp_val = 15; }
-            dev.set_control(sharp_control_id, Control::Value(sharp_val)).unwrap();
-            println!("Set sharpness: {}", sharp_val);
-        }
-        if window.is_key_pressed(Key::Left, KeyRepeat::No) {
-            sharp_val -= 1;
-            if sharp_val < 0 { sharp_val = 0; }
-            dev.set_control(sharp_control_id, Control::Value(sharp_val)).unwrap();
-            println!("Set sharpness: {}", sharp_val);
-        }
-        
-        for i in (0..stream_buf.len()).step_by(2) {
-            let r = ((stream_buf[i + 1] & 0b11111000) >> 3) * 8;
-            let g = (((stream_buf[i + 1] & 0b00000111) << 3) | ((stream_buf[i] & 0b11100000) >> 5)) * 4;
+        // decode stream buffer and distribute among other framebuffers
+        for i in (0..stream_buf.len()).step_by(2) { // assumes RGBP format, which uses 2 bytes per pixel
+            let r = stream_buf[i + 1] & 0b11111000;
+            let g = ((stream_buf[i + 1] & 0b00000111) << 5) | ((stream_buf[i] & 0b11100000) >> 3);
             let b = (stream_buf[i] & 0b00011111) << 3;
             let color = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
             
             let i = i / 2;
             
+            // update server's framebuffer (u32 0RGB)
             window_buf[i] = color;
             
-            let x = i % WIDTH;
-            let y = i / WIDTH;
-            (*img.get_pixel_mut(x as u32, y as u32)).0 = [r, g, b];
+            // update client's framebuffer (u8 u8 u8 RGB)
+            socket_buf[(i * 3) + 0] = r;
+            socket_buf[(i * 3) + 1] = g;
+            socket_buf[(i * 3) + 2] = b;
+            
+            // update video recording framebuffer ([u8; 3] RGB)
+            video_recording.set_pixel_i(i as u32, r, g, b);
         }
         
         window.update_with_buffer(&window_buf, WIDTH, HEIGHT).unwrap();
-        //img.save(format!("video/output-{:08}.bmp", frame_num)).unwrap();
-        frame_num += 1;
+        video_recording.frame();
         
-        for i in 0..window_buf.len() {
-            let color = window_buf[i];
-            socket_buf[(i * 3) + 0] = ((color & 0xFF0000) >> 16) as u8;
-            socket_buf[(i * 3) + 1] = ((color & 0x00FF00) >> 8) as u8;
-            socket_buf[(i * 3) + 2] = (color & 0x0000FF) as u8;
-        }
-        match sm_channel.send.try_send(ImageResponse(socket_buf.clone())) {
-            Ok(_) | Err(_) => ()
-        }
+        sm_channel.send.try_send(ImageResponse(socket_buf.clone())).unwrap_or_default();
     }
     
     audio_stream.stop().unwrap();
-}
-
-
-fn get_wav_writer(path: &'static str, channels: i32, sample_rate: f64) -> Result<WavWriter<std::io::BufWriter<std::fs::File>>,String> {
-    let spec = wav_spec(channels, sample_rate);
-    match hound::WavWriter::create(path, spec) {
-        Ok(writer) => Ok(writer),
-        Err(error) => Err (String::from(format!("{}",error))),
-    }
-}
-
-fn wav_spec(channels: i32, sample_rate: f64) -> hound::WavSpec {
-    hound::WavSpec {
-        channels: channels as _,
-        sample_rate: sample_rate as _,
-        bits_per_sample: (std::mem::size_of::<f32>() * 8) as _,
-        sample_format: hound::SampleFormat::Float,
-    }
+    
+    recording.get_mut().end();
 }
