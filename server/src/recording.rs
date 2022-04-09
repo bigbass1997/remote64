@@ -1,10 +1,12 @@
 
 use std::io::BufWriter;
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::process::{Command, Stdio};
 use hound::{Sample, WavSpec, WavWriter};
 use image::RgbImage;
 
+pub const REC_PATH: &'static str = "recording/";
 pub const WAV_PATH: &'static str = "recording/audio.wav";
 
 pub struct Recording {
@@ -31,6 +33,25 @@ impl Recording {
     /// When started, the framebuffer is cleared, frame counter reset to 0, and audio writer restarted.
     pub fn start(&mut self) {
         if self.started { return }
+        
+        let path = Path::new(REC_PATH);
+        if path.is_dir() {
+            for path in path.read_dir().unwrap() {
+                match path {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        if path.is_file() && (
+                                path.extension().unwrap_or_default().eq_ignore_ascii_case("mp4") ||
+                                path.extension().unwrap_or_default().eq_ignore_ascii_case("bmp") ||
+                                path.extension().unwrap_or_default().eq_ignore_ascii_case("wav")
+                            ) {
+                            std::fs::remove_file(path).unwrap();
+                        }
+                    },
+                    Err(_) => ()
+                }
+            }
+        }
         
         self.wav_writer = get_wav_writer(WAV_PATH, 2, 44100.0).unwrap();
         self.img.fill(0);
@@ -76,6 +97,17 @@ impl Recording {
         self.started = false;
         
         self.wav_writer.flush().unwrap();
+        
+        Command::new("ffmpeg")
+            .args(["-loglevel", "quiet", "-framerate", "15", "-i", "recording/output-%08d.bmp", "-c:v", "libx264", "recording/output.mp4", "-y"])
+            .stdout(Stdio::null())
+            .spawn().unwrap()
+            .wait().unwrap();
+        Command::new("ffmpeg")
+            .args(["-loglevel", "quiet", "-i", "recording/output.mp4", "-i", "recording/audio.wav", "-c:v", "copy", "-c:a", "aac", "recording/output-combined.mp4", "-y"])
+            .stdout(Stdio::null())
+            .spawn().unwrap();
+        info!("Recording save attempted.");
     }
 }
 
