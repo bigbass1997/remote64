@@ -111,11 +111,12 @@ fn main() {
     let mut audio_stream = pa.open_non_blocking_stream(settings, callback).unwrap();
     audio_stream.start().unwrap();
     
-    socket.send_message(&OwnedMessage::Binary(Packet::ImageRequest.serialize())).unwrap();
+    socket.send_message(&OwnedMessage::Binary(Packet::FrameRequest.serialize())).unwrap();
     
     let mut last_frame = Instant::now();
     let mut last_audio = Instant::now();
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        let start = Instant::now();
         match socket.recv_message() {
             Ok(msg) => match msg {
                 OwnedMessage::Close(_) => {
@@ -129,13 +130,13 @@ fn main() {
                                 debug!("Ping! {}", socket.peer_addr().unwrap());
                                 socket.send_message(&OwnedMessage::Binary(Packet::Pong.serialize())).unwrap()
                             },
-                            Packet::ImageResponse(data) => {
-                                let compressed_len = data.len();
-                                let data = zstd::decode_all(&*data).unwrap();
+                            Packet::FrameResponse(frame) => {
+                                socket.send_message(&OwnedMessage::Binary(Packet::FrameRequest.serialize())).unwrap();
+                                
                                 for i in 0..window_buf.len() {
-                                    let r = data[(i * 3)];
-                                    let g = data[(i * 3) + 1];
-                                    let b = data[(i * 3) + 2];
+                                    let r = frame.video[(i * 3)];
+                                    let g = frame.video[(i * 3) + 1];
+                                    let b = frame.video[(i * 3) + 2];
                                     window_buf[i] = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
                                 }
                                 
@@ -143,27 +144,24 @@ fn main() {
                                 info!("Last frame received: {:.3}ms | Download FPS: {:.2} | Size: {:.2}KiB vs Compress: {:.2}KiB",
                                     elapsed.as_micros() as f64 / 1000.0,
                                     1.0 / elapsed.as_secs_f64(),
-                                    data.len() as f64 / 1024.0,
-                                    compressed_len as f64 / 1024.0
+                                    frame.video.len() as f64 / 1024.0,
+                                    u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as f64 / 1024.0
                                 );
                                 last_frame = Instant::now();
                                 
-                                socket.send_message(&OwnedMessage::Binary(Packet::ImageRequest.serialize())).unwrap();
-                            },
-                            Packet::AudioSamples(samples) => {
                                 let elapsed = last_audio.elapsed();
                                 info!("Last audio chunk:   {:.3}ms | Chunk Rate: {:.2}KHz | Size: {:.2}KiB",
                                     elapsed.as_micros() as f64 / 1000.0,
-                                    samples.len() as f64 / elapsed.as_secs_f64(),
-                                    samples.len() as f64 / 1024.0
+                                    frame.audio.len() as f64 / elapsed.as_secs_f64(),
+                                    frame.audio.len() as f64 / 1024.0
                                 );
                                 last_audio = Instant::now();
-                                for sample in samples {
+                                for sample in frame.audio {
                                     sample_queue.push(sample);
                                 }
                             },
                             Packet::RequestDenied => {
-                                socket.send_message(&OwnedMessage::Binary(Packet::ImageRequest.serialize())).unwrap();
+                                socket.send_message(&OwnedMessage::Binary(Packet::FrameRequest.serialize())).unwrap();
                             }
                             _ => ()
                         },
@@ -175,6 +173,8 @@ fn main() {
             Err(_) => ()
         }
         
+        let elapsed = start.elapsed().as_micros() as f64 / 1000.0;
+        info!("Frame processing took: {:.3}ms | FPS: {:.2}", elapsed, 1000.0 / elapsed);
         window.update_with_buffer(&window_buf, WIDTH, HEIGHT).unwrap();
     }
     

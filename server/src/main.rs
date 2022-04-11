@@ -3,15 +3,16 @@ extern crate env_logger;
 #[macro_use] extern crate log;
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use clap::{AppSettings, Arg, Command};
+use crossbeam_queue::SegQueue;
 use log::LevelFilter;
 use minifb::{Key, Window, WindowOptions};
 use minifb::{Scale, ScaleMode};
 use portaudio::DeviceIndex;
 use v4l::io::traits::OutputStream;
-use remote64_common::Feature;
-use remote64_common::Packet::{AudioSamples, ImageResponse};
+use remote64_common::{Feature, Frame};
 use remote64_common::util::InfCell;
 use crate::intercom::{BroadcastNetwork, InterMessage};
 use crate::sockets::SocketManager;
@@ -147,8 +148,8 @@ fn main() {
     
     let audio_endpoint = intercom.endpoint();
     drop(audio_endpoint.recv);
-    let samples = InfCell::new(Vec::with_capacity(512 * 18));
-    let callback_samples = samples.get_mut();
+    let samples = Arc::new(SegQueue::<f32>::new());
+    let callback_samples = samples.clone();
     let callback = move |portaudio::stream::DuplexCallbackArgs {
                              in_buffer,
                              out_buffer,
@@ -164,10 +165,6 @@ fn main() {
             *output_sample = *input_sample;
             
             callback_samples.push(*input_sample);
-            if callback_samples.len() >= 512 * 18 {
-                audio_endpoint.send.try_send(InterMessage::SocketPacket(AudioSamples(callback_samples.clone()))).unwrap_or_default();
-                callback_samples.clear();
-            }
             
             if audio_recording.started() {
                 audio_recording.sample(*input_sample);
@@ -217,10 +214,20 @@ fn main() {
             video_recording.set_pixel_i(i as u32, r, g, b);
         }
         
+        // update server window
         window.update_with_buffer(&window_buf, WIDTH, HEIGHT).unwrap();
+        
+        // attempt to save new video frame (if recording is running)
         video_recording.frame();
         
-        video_endpoint.send.try_send(InterMessage::SocketPacket(ImageResponse(socket_buf.clone()))).unwrap_or_default();
+        
+        // send latest frame
+        let len = samples.len();
+        let mut sample_buf = Vec::with_capacity(len);
+        for _ in 0..len {
+            sample_buf.push(samples.pop().unwrap());
+        }
+        video_endpoint.send.try_send(InterMessage::LatestFrame(Frame::new(socket_buf.clone(), sample_buf))).unwrap_or_default();
     }
     
     audio_stream.stop().unwrap();

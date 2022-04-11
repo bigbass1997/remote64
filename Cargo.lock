@@ -1318,7 +1318,6 @@ dependencies = [
  "portaudio",
  "remote64-common",
  "websocket",
- "zstd",
 ]
 
 [[package]]
@@ -1331,6 +1330,7 @@ dependencies = [
  "num_enum",
  "strum",
  "strum_macros",
+ "zstd",
 ]
 
 [[package]]
@@ -1350,7 +1350,6 @@ dependencies = [
  "remote64-common",
  "v4l",
  "websocket",
- "zstd",
 ]
 
 [[package]]

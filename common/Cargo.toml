@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 num_enum = "0.5"
 num-traits = "0.2"
+zstd = "*"
 
 log = "0.4"
 env_logger = "0.9"

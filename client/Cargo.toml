@@ -10,7 +10,6 @@ websocket = { version = "0.26", default-features = false, features = ["sync", "s
 log = "0.4"
 env_logger = "0.9"
 clap = { version = "3.1", features = ["cargo", "env"] }
-zstd = "*"
 
 minifb = "0.20"
 portaudio = "0.7"

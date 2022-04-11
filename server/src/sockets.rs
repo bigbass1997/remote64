@@ -46,8 +46,6 @@ impl SocketClient {
 pub struct SocketManager {
     socket: WsServer,
     client_queue: VecDeque<SocketClient>,
-    last_frame: Vec<u8>,
-    last_frame_stale: bool,
 }
 
 impl SocketManager {
@@ -64,8 +62,6 @@ impl SocketManager {
         let mut sm = SocketManager {
             socket,
             client_queue: VecDeque::new(),
-            last_frame: Default::default(),
-            last_frame_stale: true,
         };
         
         std::thread::Builder::new().name("SocketManager".to_owned()).spawn(move || {
@@ -129,13 +125,12 @@ impl SocketManager {
                                         client.last_pong = Instant::now()
                                     },
                                     
-                                    ImageRequest if !client.waiting => { // if client is at front of queue
+                                    FrameRequest if !client.waiting => { // if client is at front of queue
                                         client.requesting_image = true;
-                                        endpoint.send.try_send(InterMessage::SocketPacket(packet)).unwrap_or_default()
                                     }
-                                    ImageRequest => send_packet(client, RequestDenied),
+                                    FrameRequest => send_packet(client, RequestDenied),
                                     
-                                    InfoResponse(_) | QueueResponse(_) | ImageResponse(_) | AudioSamples(_) | RequestDenied | Unknown(_) => (),
+                                    InfoResponse(_) | QueueResponse(_) | FrameResponse(_) | RequestDenied | Unknown(_) => (),
                                 }
                             },
                             _ => ()
@@ -150,18 +145,6 @@ impl SocketManager {
                             send_packet(client, Ping);
                             client.last_ping = Instant::now();
                         }
-                        
-                        
-                        if client.requesting_image && !sm.last_frame_stale {
-                            match zstd::encode_all(sm.last_frame.as_slice(), 3) {
-                                Ok(data) => {
-                                    send_packet(client, ImageResponse(data));
-                                },
-                                Err(err) => warn!("Failed to compress image data: {:?}", err)
-                            }
-                            client.requesting_image = false;
-                            sm.last_frame_stale = true;
-                        }
                     }
                 }
                 disconnects.sort();
@@ -175,18 +158,14 @@ impl SocketManager {
                 // Process any internally created messages, provided to the socket manager
                 while let Ok(msg) = endpoint.recv.try_recv() {
                     match msg {
-                        InterMessage::SocketPacket(packet) => match packet {
-                            ImageResponse(img) => { // Update internal state with latest image
-                                sm.last_frame = img;
-                                sm.last_frame_stale = false;
-                            },
-                            AudioSamples(samples) => {
-                                if let Some(socket) = sm.client_queue.front_mut() {
-                                    debug!("Send_packet {} samples.", samples.len());
-                                    send_packet(socket, AudioSamples(samples));
+                        InterMessage::LatestFrame(frame) => {
+                            if let Some(client) = sm.client_queue.front_mut() {
+                                if client.requesting_image {
+                                    send_packet(client, FrameResponse(frame));
+                                    
+                                    client.requesting_image = false;
                                 }
-                            },
-                            _ => ()
+                            }
                         },
                         _ => ()
                     }
