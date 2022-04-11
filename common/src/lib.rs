@@ -56,8 +56,8 @@ pub struct ServerInfo {
 impl ServerInfo {
     pub fn serialize(&self) -> Vec<u8> {
         let mut raw = vec![];
-        raw.copy_from_slice(&self.header);
-        raw.copy_from_slice(&self.version.to_be_bytes());
+        raw.extend_from_slice(&self.header);
+        raw.extend_from_slice(&self.version.to_be_bytes());
         for feat in &self.features {
             raw.push((*feat).into());
         }
@@ -87,9 +87,10 @@ impl Frame {
                 vec![]
             }
         };
+        let video = &self.video;
         
         raw.extend_from_slice(&(video.len() as u32).to_be_bytes());
-        raw.extend_from_slice(&video);
+        raw.extend_from_slice(video);
         for sample in &self.audio {
             raw.extend_from_slice(&sample.to_be_bytes());
         }
@@ -98,17 +99,20 @@ impl Frame {
     }
     
     pub fn deserialize(data: Vec<u8>) -> Frame {
+        println!("deserialize frame start");
         if data.len() <= 4 {
             return Frame::default();
         }
         
         let video_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        let video = zstd::decode_all(&data[4..(video_len + 4)]).unwrap();
+        //let video = zstd::decode_all(&data[4..(video_len + 4)]).unwrap();
+        let video = data[4..(video_len + 4)].to_vec();
         
         let mut audio = vec![];
         for i in ((video_len + 4)..data.len()).step_by(4) {
             audio.push(f32::from_be_bytes([data[i + 0], data[i + 1], data[i + 2], data[i + 3]]));
         }
+        println!("deserialize frame end");
         
         Frame::new(video, audio)
     }
@@ -122,8 +126,8 @@ pub enum Packet {
     InfoResponse(ServerInfo),
     QueueRequest,
     QueueResponse(u32),
-    FrameRequest, //TODO: Add image formatting and options to request (allow client to specify lower resolutions or lossy quality)
-    FrameResponse(Frame), //TODO: Add image datastructure to convey format of image (necessary once resolution/lossy options are implemented)
+    FrameRequest(u32), //TODO: Add image formatting and options to request (allow client to specify lower resolutions or lossy quality)
+    FrameResponse(Vec<Frame>), //TODO: Add image datastructure to convey format of image (necessary once resolution/lossy options are implemented)
     RequestDenied,
     Unknown(Vec<u8>),
 }
@@ -132,7 +136,7 @@ use Packet::*;
 impl Packet {
     pub fn deserialize(data: &[u8]) -> Result<Packet, PacketError> {
         if data.is_empty() { return Err(Empty) }
-        
+        println!("deserialize type: {:#04X}", data[0]);
         match data[0] {
             ID_PING => Ok(Ping),
             ID_PONG => Ok(Pong),
@@ -159,8 +163,33 @@ impl Packet {
                 
                 Ok(QueueResponse(u32::from_be_bytes([data[1], data[2], data[3], data[4]])))
             },
-            ID_FRAME_REQ => Ok(FrameRequest),
-            ID_FRAME_RES => Ok(FrameResponse(Frame::deserialize(data[1..].to_vec()))),
+            ID_FRAME_REQ => {
+                if data.len() < 5 { return Err(UnexpectedLength) }
+                println!("req data: {:?}", data[0..=4].to_vec());
+                
+                Ok(FrameRequest(u32::from_be_bytes([data[1], data[2], data[3], data[4]])))
+            },
+            ID_FRAME_RES => {
+                if data.len() < 1 { return Err(UnexpectedLength) }
+                //let frame = Frame::deserialize(data[1..].to_vec());
+                
+                println!("data: {:?}", data[0..=4].to_vec());
+                let count = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                let mut frames = vec![];
+                println!("count: {}", count);
+                let mut i = 5;
+                for _ in 0..count {
+                    let frame_len = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
+                    i += 4;
+                    println!("frame_len: {}", frame_len);
+                    
+                    frames.push(Frame::deserialize(data[i..(i + frame_len)].to_vec()));
+                    i += frame_len;
+                }
+                
+                Ok(FrameResponse(frames))
+                //Ok(FrameResponse(vec![frame]))
+            },
             
             ID_REQ_DENIED => Ok(RequestDenied),
             _ => Ok(Unknown(data.to_vec()))
@@ -175,7 +204,7 @@ impl Packet {
             InfoResponse(_) => ID_INFO_RES,
             QueueRequest => ID_QUEUE_REQ,
             QueueResponse(_) => ID_QUEUE_RES,
-            FrameRequest => ID_FRAME_REQ,
+            FrameRequest(_) => ID_FRAME_REQ,
             FrameResponse(_) => ID_FRAME_RES,
             
             RequestDenied => ID_REQ_DENIED,
@@ -192,8 +221,27 @@ impl Packet {
             InfoResponse(info) => raw.extend_from_slice(&info.serialize()),
             QueueRequest => (),
             QueueResponse(data) => raw.extend_from_slice(&data.to_be_bytes()),
-            FrameRequest => (),
-            FrameResponse(frame) => raw.extend_from_slice(&frame.serialize()),
+            FrameRequest(count) => {
+                println!("serialize req start");
+                raw.extend_from_slice(&count.to_be_bytes());
+                println!("serialize req end");
+            },
+            FrameResponse(frames) => {
+                println!("serialize resp start");
+                //raw.extend_from_slice(&1u32.to_be_bytes());
+                //let serialized = frames[0].serialize();
+                //raw.extend_from_slice(&(serialized.len() as u32).to_be_bytes());
+                //raw.extend_from_slice(&serialized);
+                
+                raw.extend_from_slice(&(frames.len() as u32).to_be_bytes());
+                
+                for frame in frames {
+                    let serialized = frame.serialize();
+                    raw.extend_from_slice(&(serialized.len() as u32).to_be_bytes());
+                    raw.extend_from_slice(&serialized);
+                }
+                println!("serialize resp end. len: {}", raw.len());
+            },
             
             RequestDenied => (),
             Unknown(data) => raw.extend_from_slice(&data),

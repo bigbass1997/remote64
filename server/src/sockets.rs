@@ -1,10 +1,12 @@
+
 use std::collections::vec_deque::VecDeque;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
+use crossbeam_queue::SegQueue;
 use websocket::OwnedMessage;
 use websocket::server::NoTlsAcceptor;
 use websocket::sync::{Client, Server};
-use remote64_common::{Feature, Packet, Packet::*, ServerInfo};
+use remote64_common::{Feature, Frame, Packet, Packet::*, ServerInfo};
 use remote64_common::intercom::{Endpoint, InterMessage};
 
 pub const INFO_HEADER: [u8; 4] = [0x52, 0x4D, 0x36, 0x34]; // RM64
@@ -20,7 +22,6 @@ pub struct SocketClient {
     socket: WsClient,
     last_ping: Instant,
     last_pong: Instant,
-    requesting_image: bool,
     waiting: bool,
 }
 impl SocketClient {
@@ -28,7 +29,6 @@ impl SocketClient {
         socket: socket,
         last_ping: Instant::now(),
         last_pong: Instant::now(),
-        requesting_image: false,
         waiting: true,
     }}
 }
@@ -63,6 +63,7 @@ impl SocketManager {
             client_queue: VecDeque::new(),
         };
         
+        let frame_queue = SegQueue::new();
         std::thread::Builder::new().name("SocketManager".to_owned()).spawn(move || {
             loop {
                 // Accept any waiting connection requests, and add them to the queue
@@ -117,17 +118,42 @@ impl SocketManager {
                                     QueueRequest => send_packet(client, QueueResponse(i as u32)),
                                     Ping => {
                                         debug!("Ping! {}", parse_peer(&client.socket));
-                                        send_packet(client, Pong)
+                                        //send_packet(client, Pong);
+                                        send_packet(client, FrameResponse(vec![Frame::new(vec![213u8; 720*50*3], vec![])]));
                                     },
                                     Pong => {
                                         debug!("Pong! {}", parse_peer(&client.socket));
-                                        client.last_pong = Instant::now()
+                                        client.last_pong = Instant::now();
                                     },
                                     
-                                    FrameRequest if !client.waiting => { // if client is at front of queue
-                                        client.requesting_image = true;
+                                    FrameRequest(requested) if !client.waiting => { // if client is at front of queue
+                                        //debug!("Sending pong instead of frames.");
+                                        //send_packet(client, Pong);
+                                        debug!("Sending blank frame.");
+                                        send_packet(client, FrameResponse(vec![Frame::new(vec![123u8; 720*480*3], vec![])]));
+                                        /*let requested = requested as usize;
+                                        let available = frame_queue.len();
+                                        let to_send = if available <= requested {
+                                            available
+                                        } else {
+                                            requested
+                                        };
+                                        
+                                        let mut frames = vec![];
+                                        for _ in 0..to_send {
+                                            match frame_queue.pop() {
+                                                Some(frame) => frames.push(frame),
+                                                None => break
+                                            }
+                                        }
+                                        let len = frames.len();
+                                        let packet = FrameResponse(frames);
+                                        let data = packet.serialize();
+                                        
+                                        debug!("Sending {} frames. Size: {:.2} KiB", len, data.len() as f64 / 1024.0);
+                                        send_packet(client, packet);*/
                                     }
-                                    FrameRequest => send_packet(client, RequestDenied),
+                                    FrameRequest(_) => send_packet(client, RequestDenied),
                                     
                                     InfoResponse(_) | QueueResponse(_) | FrameResponse(_) | RequestDenied | Unknown(_) => (),
                                 }
@@ -139,7 +165,7 @@ impl SocketManager {
                         disconnects.push(i);
                         continue;
                     } else {
-                        if client.last_ping.elapsed() > Duration::from_secs(10) {
+                        if client.last_ping.elapsed() > Duration::from_secs(3) {
                             debug!("Ping! {}", parse_peer(&client.socket));
                             send_packet(client, Ping);
                             client.last_ping = Instant::now();
@@ -158,12 +184,9 @@ impl SocketManager {
                 while let Ok(msg) = endpoint.recv.try_recv() {
                     match msg {
                         InterMessage::LatestFrame(frame) => {
-                            if let Some(client) = sm.client_queue.front_mut() {
-                                if client.requesting_image {
-                                    send_packet(client, FrameResponse(frame));
-                                    
-                                    client.requesting_image = false;
-                                }
+                            frame_queue.push(frame);
+                            while frame_queue.len() > 30 {
+                                frame_queue.pop();
                             }
                         },
                         _ => ()
@@ -177,12 +200,12 @@ impl SocketManager {
 }
 
 fn send_packet(client: &mut SocketClient, packet: Packet) {
-    client.socket.set_nonblocking(false).unwrap();
+    //client.socket.set_nonblocking(false).unwrap();
     match client.socket.send_message(&OwnedMessage::Binary(packet.serialize())) {
         Ok(_) => (),
         Err(err) => warn!("Failed to send message: {:?}", err)
     }
-    client.socket.set_nonblocking(true).unwrap();
+    //client.socket.set_nonblocking(true).unwrap();
 }
 
 fn parse_peer(socket: &WsClient) -> String {

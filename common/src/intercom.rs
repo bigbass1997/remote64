@@ -85,7 +85,9 @@ impl<T: Clone> BroadcastNetwork<T> {
                         Ok(msg) => {
                             for j in 0..self.channels.len() {
                                 if i != j {
-                                    self.channels[j].send.send(msg.clone()).unwrap_or_default()
+                                    //println!("network sending message");
+                                    self.channels[j].send.try_send(msg.clone()).unwrap_or_default();
+                                    //println!("sent");
                                 }
                             }
                         },
@@ -101,7 +103,7 @@ impl<T: Clone> BroadcastNetwork<T> {
             }
             
             for i in (0..indices.len()).rev() {
-                self.channels.remove(indices[i]);
+                //self.channels.remove(indices[i]);
             }
             indices.clear();
             
@@ -115,9 +117,11 @@ impl<T: Clone> BroadcastNetwork<T> {
 pub enum InterMessage {
     SocketPacket(Packet),
     LatestFrame(Frame),
+    BulkFrames(Vec<Frame>),
     StartRecording,
     StopRecording,
     
+    Kill,
 }
 
 pub type Endpoint = BidirectionalChannel<InterMessage, InterMessage>;

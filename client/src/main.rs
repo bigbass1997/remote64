@@ -2,6 +2,8 @@
 extern crate env_logger;
 #[macro_use] extern crate log;
 
+use std::cmp::max;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use clap::{AppSettings, Arg, Command};
@@ -9,7 +11,13 @@ use crossbeam_queue::SegQueue;
 use log::LevelFilter;
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 use websocket::OwnedMessage;
-use remote64_common::Packet;
+use remote64_common::intercom::{BroadcastNetwork, InterMessage};
+use remote64_common::{Feature, Packet};
+use crate::socket::SocketManager;
+
+
+mod socket;
+
 
 const WIDTH: usize = 720;
 const HEIGHT: usize = 480;
@@ -53,6 +61,14 @@ fn main() {
         logbuilder.init();
     }
     
+    // Collect features from cli arguments
+    let features: Vec<Feature> = matches.values_of("features").unwrap_or_default().map(|feat| Feature::from_str(feat).unwrap_or_default()).collect();
+    
+    let mut intercom = BroadcastNetwork::<InterMessage>::new();
+    
+    // Initialize socket manager which handles the client's connection with the remote64 server
+    SocketManager::init(matches.value_of("domain"), features, intercom.endpoint());
+    
     let pa = portaudio::PortAudio::new().unwrap();
     let output_device_id = pa.default_output_device().unwrap();
     let output_device_info = pa.device_info(output_device_id).unwrap();
@@ -74,19 +90,13 @@ fn main() {
     
     window.limit_update_rate(Some(Duration::from_secs_f32(1.0/30.0)));
     
-    info!("Attempting to connect...");
-    let mut socket = websocket::ClientBuilder::new(&format!("ws://{}:6400", matches.value_of("domain").unwrap_or("bigbass1997.com"))).unwrap().connect_insecure().unwrap();
-    info!("Connected!");
-    
-    std::thread::sleep(Duration::from_secs(1));
-    
     
     pa.is_output_format_supported(output_params, 44100.0).unwrap();
     
     let settings = portaudio::OutputStreamSettings::new(output_params, 44100.0, 512);
     
-    let sample_queue = Arc::new(SegQueue::new());
-    let callback_sample_queue = sample_queue.clone();
+    let audio_queue = Arc::new(SegQueue::new());
+    let callback_audio_queue = audio_queue.clone();
     let callback = move |portaudio::stream::OutputCallbackArgs {
                              buffer,
                              frames: _,
@@ -98,7 +108,7 @@ fn main() {
         }
         
         for output_sample in buffer.iter_mut() {
-            if let Some(sample) = callback_sample_queue.pop() {
+            if let Some(sample) = callback_audio_queue.pop() {
                 *output_sample = sample;
             } else {
                 *output_sample = 0.0;
@@ -111,72 +121,86 @@ fn main() {
     let mut audio_stream = pa.open_non_blocking_stream(settings, callback).unwrap();
     audio_stream.start().unwrap();
     
-    socket.send_message(&OwnedMessage::Binary(Packet::FrameRequest.serialize())).unwrap();
+    let video_queue = Arc::new(SegQueue::<Vec<u8>>::new());
+    let output_video_queue = video_queue.clone();
     
-    let mut last_frame = Instant::now();
-    let mut last_audio = Instant::now();
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        let start = Instant::now();
-        match socket.recv_message() {
-            Ok(msg) => match msg {
-                OwnedMessage::Close(_) => {
-                    info!("Connection closed by server.");
-                    return;
-                },
-                OwnedMessage::Binary(data) => {
-                    match Packet::deserialize(&data) {
-                        Ok(packet) => match packet {
-                            Packet::Ping => {
-                                debug!("Ping! {}", socket.peer_addr().unwrap());
-                                socket.send_message(&OwnedMessage::Binary(Packet::Pong.serialize())).unwrap()
-                            },
-                            Packet::FrameResponse(frame) => {
-                                socket.send_message(&OwnedMessage::Binary(Packet::FrameRequest.serialize())).unwrap();
-                                
-                                for i in 0..window_buf.len() {
-                                    let r = frame.video[(i * 3)];
-                                    let g = frame.video[(i * 3) + 1];
-                                    let b = frame.video[(i * 3) + 2];
-                                    window_buf[i] = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-                                }
-                                
-                                let elapsed = last_frame.elapsed();
-                                info!("Last frame received: {:.3}ms | Download FPS: {:.2} | Size: {:.2}KiB vs Compress: {:.2}KiB",
-                                    elapsed.as_micros() as f64 / 1000.0,
-                                    1.0 / elapsed.as_secs_f64(),
-                                    frame.video.len() as f64 / 1024.0,
-                                    u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as f64 / 1024.0
-                                );
-                                last_frame = Instant::now();
-                                
-                                let elapsed = last_audio.elapsed();
-                                info!("Last audio chunk:   {:.3}ms | Chunk Rate: {:.2}KHz | Size: {:.2}KiB",
-                                    elapsed.as_micros() as f64 / 1000.0,
-                                    frame.audio.len() as f64 / elapsed.as_secs_f64(),
-                                    frame.audio.len() as f64 / 1024.0
-                                );
-                                last_audio = Instant::now();
-                                for sample in frame.audio {
-                                    sample_queue.push(sample);
-                                }
-                            },
-                            Packet::RequestDenied => {
-                                socket.send_message(&OwnedMessage::Binary(Packet::FrameRequest.serialize())).unwrap();
-                            }
-                            _ => ()
-                        },
-                        Err(_) => ()
+    let frame_endpoint = intercom.endpoint();
+    drop(frame_endpoint.send);
+    std::thread::spawn(move || {
+        while let Ok(msg) = frame_endpoint.recv.recv() {
+            match msg {
+                InterMessage::BulkFrames(frames) => {
+                    println!("Bulk Received: {}", frames.len());
+                    for frame in frames {
+                        video_queue.push(frame.video);
+                        for sample in frame.audio {
+                            audio_queue.push(sample);
+                        }
                     }
-                }
+                },
                 _ => ()
-            },
-            Err(_) => ()
+            }
+        }
+    });
+    
+    
+    let video_endpoint = intercom.endpoint();
+    drop(video_endpoint.recv);
+    
+    std::thread::spawn(move || {
+        intercom.start();
+    });
+    
+    loop {
+        video_endpoint.send.try_send(InterMessage::SocketPacket(Packet::FrameRequest(1 as u32))).unwrap();
+        
+        std::thread::sleep(Duration::from_secs_f64(0.5));
+    }
+    
+    //let mut last_frame = Instant::now();
+    //let mut last_audio = Instant::now();
+    /*while window.is_open() && !window.is_key_down(Key::Escape) {
+        while let Ok(_) = video_endpoint.recv.try_recv() {}
+        
+        let queue_len = output_video_queue.len();
+        if queue_len < 300 {
+        println!("test2");
+            let remaining = max(15 - queue_len, 5);
+            
+        println!("test3");
+            video_endpoint.send.try_send(InterMessage::SocketPacket(Packet::FrameRequest(25 as u32))).unwrap();
+            println!("test333");
+            std::thread::sleep(Duration::from_secs_f64(5.0));
+        }
+        println!("test4");
+        
+        //let video = output_video_queue.pop();
+        let video: Option<Vec<u8>> = Some(vec![127u8; 720*480*3]);
+        println!("test5");
+        if video.is_none() {
+        println!("test6");
+            println!("len: {}", window_buf.len());
+            window.update_with_buffer(&window_buf, WIDTH, HEIGHT).unwrap();
+        println!("test7");
+            continue;
+        }
+        println!("test8");
+        let video = video.unwrap();
+        
+        
+        let start = Instant::now();
+        for i in 0..window_buf.len() {
+            let r = video[(i * 3)];
+            let g = video[(i * 3) + 1];
+            let b = video[(i * 3) + 2];
+            window_buf[i] = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
         }
         
         let elapsed = start.elapsed().as_micros() as f64 / 1000.0;
         info!("Frame processing took: {:.3}ms | FPS: {:.2}", elapsed, 1000.0 / elapsed);
         window.update_with_buffer(&window_buf, WIDTH, HEIGHT).unwrap();
-    }
+    }*/
     
-    socket.send_message(&OwnedMessage::Close(None)).unwrap();
+    video_endpoint.send.try_send(InterMessage::Kill).unwrap_or_default();
+    std::thread::sleep(Duration::from_secs(1));
 }
