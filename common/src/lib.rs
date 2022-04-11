@@ -2,8 +2,9 @@ use log::warn;
 use strum_macros::EnumString;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
-pub mod util;
+pub mod intercom;
 pub mod logger;
+pub mod util;
 
 
 pub const API_INFO: [u8; 6] = [b'R', b'M', b'6', b'4', 0x00, 0x00];

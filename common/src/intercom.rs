@@ -1,6 +1,6 @@
 use std::time::Duration;
 use crossbeam_channel::{bounded, Receiver, Sender, unbounded};
-use remote64_common::{Frame, Packet};
+use crate::{Frame, Packet};
 
 /// A channel for sending and receiving messages with another BidirectionalChannel.
 /// 

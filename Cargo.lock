@@ -1324,6 +1324,7 @@ dependencies = [
 name = "remote64-common"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "env_logger 0.9.0",
  "log 0.4.14",
  "num-traits",

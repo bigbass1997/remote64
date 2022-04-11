@@ -5,8 +5,7 @@ use websocket::OwnedMessage;
 use websocket::server::NoTlsAcceptor;
 use websocket::sync::{Client, Server};
 use remote64_common::{Feature, Packet, Packet::*, ServerInfo};
-use crate::intercom::Endpoint;
-use crate::InterMessage;
+use remote64_common::intercom::{Endpoint, InterMessage};
 
 pub const INFO_HEADER: [u8; 4] = [0x52, 0x4D, 0x36, 0x34]; // RM64
 pub const INFO_VERSION: u16 = 0x0000;

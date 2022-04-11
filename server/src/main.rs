@@ -14,14 +14,13 @@ use portaudio::DeviceIndex;
 use v4l::io::traits::OutputStream;
 use remote64_common::{Feature, Frame};
 use remote64_common::util::InfCell;
-use crate::intercom::{BroadcastNetwork, InterMessage};
+use remote64_common::intercom::{BroadcastNetwork, InterMessage};
 use crate::sockets::SocketManager;
 use crate::recording::Recording;
 use crate::video::VideoStream;
 
 
 mod sockets;
-mod intercom;
 mod recording;
 mod video;
 
