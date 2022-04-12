@@ -1,31 +1,24 @@
 
 use std::collections::vec_deque::VecDeque;
-use std::net::TcpStream;
 use std::time::{Duration, Instant};
 use crossbeam_queue::SegQueue;
-use websocket::OwnedMessage;
-use websocket::server::NoTlsAcceptor;
-use websocket::sync::{Client, Server};
-use remote64_common::{Feature, Frame, Packet, Packet::*, ServerInfo};
+use remote64_common::{Feature, Packet, Packet::*, ServerInfo};
 use remote64_common::intercom::{Endpoint, InterMessage};
+use remote64_common::network::{Server, SocketConnection};
 
 pub const INFO_HEADER: [u8; 4] = [0x52, 0x4D, 0x36, 0x34]; // RM64
 pub const INFO_VERSION: u16 = 0x0000;
 
-type WsClient = Client<TcpStream>;
-type WsServer = Server<NoTlsAcceptor>;
-
-
 
 /// Contains the status of a connected client.
 pub struct SocketClient {
-    socket: WsClient,
+    socket: SocketConnection,
     last_ping: Instant,
     last_pong: Instant,
     waiting: bool,
 }
 impl SocketClient {
-    pub fn new(socket: WsClient) -> Self { Self {
+    pub fn new(socket: SocketConnection) -> Self { Self {
         socket: socket,
         last_ping: Instant::now(),
         last_pong: Instant::now(),
@@ -43,7 +36,7 @@ impl SocketClient {
 /// The manager also acts as a relay between the active client and the rest of the
 /// server's components (e.g. handling `Packet` transmissions).
 pub struct SocketManager {
-    socket: WsServer,
+    socket: Server,
     client_queue: VecDeque<SocketClient>,
 }
 
@@ -55,8 +48,7 @@ impl SocketManager {
             features,
         };
         
-        let socket = WsServer::bind("0.0.0.0:6400").unwrap();
-        socket.set_nonblocking(true).unwrap();
+        let socket = Server::new("0.0.0.0:6400");
         
         let mut sm = SocketManager {
             socket,
@@ -67,20 +59,9 @@ impl SocketManager {
         std::thread::Builder::new().name("SocketManager".to_owned()).spawn(move || {
             loop {
                 // Accept any waiting connection requests, and add them to the queue
-                while let Ok(request) = sm.socket.accept() {
-                    match request.accept() {
-                        Ok(client) => {
-                            match client.set_nonblocking(true) {
-                                Ok(_) => (),
-                                Err(err) => warn!("Failed to set client nonblocking: {:?}", err)
-                            }
-                            info!("Client {} connected.", parse_peer(&client));
-                            client.set_nonblocking(true).unwrap();
-                            sm.client_queue.push_back(SocketClient::new(client));
-                            
-                        },
-                        Err(err) => warn!("Failed to accept client: {:?}", err)
-                    }
+                while let Some(client) = sm.socket.accept() {
+                    info!("Client {} connected.", client.peer);
+                    sm.client_queue.push_back(SocketClient::new(client));
                 }
                 
                 // Client keep-alive and message passing
@@ -94,79 +75,73 @@ impl SocketManager {
                     if i == 0 && client.waiting {
                         client.waiting = false;
                         endpoint.send.try_send(InterMessage::StartRecording).unwrap_or_default();
-                        info!("Client {} is being serviced now.", parse_peer(&client.socket));
+                        info!("Client {} is being serviced now.", client.socket.peer);
                     }
                     
-                    while let Ok(msg) = client.socket.recv_message() {
-                        match msg {
-                            OwnedMessage::Close(_) => {
+                    while let Ok(msg) = client.socket.recv.try_recv() {
+                            /*OwnedMessage::Close(_) => {
                                 disconnects.push(i);
-                                info!("Client {} disconnected.", parse_peer(&client.socket));
+                                info!("Client {} disconnected.", client.socket.peer);
                                 continue;
+                            },*/
+                        let packet = match Packet::deserialize(&msg) {
+                            Ok(packet) => packet,
+                            Err(err) => {
+                                warn!("Malformed packet: {:?}", err);
+                                continue;
+                            }
+                        };
+                        
+                        match packet {
+                            InfoRequest => send_packet(client, InfoResponse(server_info.clone())),
+                            QueueRequest => send_packet(client, QueueResponse(i as u32)),
+                            Ping => {
+                                debug!("Ping! {}", client.socket.peer);
+                                send_packet(client, Pong);
                             },
-                            OwnedMessage::Binary(data) => {
-                                let packet = match Packet::deserialize(&data) {
-                                    Ok(packet) => packet,
-                                    Err(err) => {
-                                        warn!("Malformed packet: {:?}", err);
-                                        continue;
-                                    }
+                            Pong => {
+                                debug!("Pong! {}", client.socket.peer);
+                                client.last_pong = Instant::now();
+                            },
+                            
+                            FrameRequest(requested) if !client.waiting => { // if client is at front of queue
+                                //debug!("Sending pong instead of frames.");
+                                //send_packet(client, Pong);
+                                //debug!("Sending blank frame.");
+                                //send_packet(client, FrameResponse(vec![Frame::new(vec![231u8; 720*480*3], vec![])]));
+                                let requested = requested as usize;
+                                let available = frame_queue.len();
+                                let to_send = if available <= requested {
+                                    available
+                                } else {
+                                    requested
                                 };
                                 
-                                match packet {
-                                    InfoRequest => send_packet(client, InfoResponse(server_info.clone())),
-                                    QueueRequest => send_packet(client, QueueResponse(i as u32)),
-                                    Ping => {
-                                        debug!("Ping! {}", parse_peer(&client.socket));
-                                        //send_packet(client, Pong);
-                                        send_packet(client, FrameResponse(vec![Frame::new(vec![213u8; 720*50*3], vec![])]));
-                                    },
-                                    Pong => {
-                                        debug!("Pong! {}", parse_peer(&client.socket));
-                                        client.last_pong = Instant::now();
-                                    },
-                                    
-                                    FrameRequest(requested) if !client.waiting => { // if client is at front of queue
-                                        //debug!("Sending pong instead of frames.");
-                                        //send_packet(client, Pong);
-                                        debug!("Sending blank frame.");
-                                        send_packet(client, FrameResponse(vec![Frame::new(vec![123u8; 720*480*3], vec![])]));
-                                        /*let requested = requested as usize;
-                                        let available = frame_queue.len();
-                                        let to_send = if available <= requested {
-                                            available
-                                        } else {
-                                            requested
-                                        };
-                                        
-                                        let mut frames = vec![];
-                                        for _ in 0..to_send {
-                                            match frame_queue.pop() {
-                                                Some(frame) => frames.push(frame),
-                                                None => break
-                                            }
-                                        }
-                                        let len = frames.len();
-                                        let packet = FrameResponse(frames);
-                                        let data = packet.serialize();
-                                        
-                                        debug!("Sending {} frames. Size: {:.2} KiB", len, data.len() as f64 / 1024.0);
-                                        send_packet(client, packet);*/
+                                let mut frames = vec![];
+                                for _ in 0..to_send {
+                                    match frame_queue.pop() {
+                                        Some(frame) => frames.push(frame),
+                                        None => break
                                     }
-                                    FrameRequest(_) => send_packet(client, RequestDenied),
-                                    
-                                    InfoResponse(_) | QueueResponse(_) | FrameResponse(_) | RequestDenied | Unknown(_) => (),
                                 }
-                            },
-                            _ => ()
+                                let len = frames.len();
+                                let packet = FrameResponse(frames);
+                                let data = packet.serialize();
+                                
+                                debug!("Sending {} frames. Size: {:.2} KiB", len, data.len() as f64 / 1024.0);
+                                send_packet(client, packet);
+                            }
+                            FrameRequest(_) => send_packet(client, RequestDenied),
+                            
+                            InfoResponse(_) | QueueResponse(_) | FrameResponse(_) | RequestDenied | Unknown(_) => (),
                         }
                     }
                     if client.last_pong.elapsed() > Duration::from_secs(22) {
                         disconnects.push(i);
                         continue;
                     } else {
-                        if client.last_ping.elapsed() > Duration::from_secs(3) {
-                            debug!("Ping! {}", parse_peer(&client.socket));
+                        if client.last_ping.elapsed() > Duration::from_secs(10) {
+                            debug!("Ping! {}", client.socket.peer);
                             send_packet(client, Ping);
                             client.last_ping = Instant::now();
                         }
@@ -185,7 +160,7 @@ impl SocketManager {
                     match msg {
                         InterMessage::LatestFrame(frame) => {
                             frame_queue.push(frame);
-                            while frame_queue.len() > 30 {
+                            while frame_queue.len() > 60 {
                                 frame_queue.pop();
                             }
                         },
@@ -200,17 +175,5 @@ impl SocketManager {
 }
 
 fn send_packet(client: &mut SocketClient, packet: Packet) {
-    //client.socket.set_nonblocking(false).unwrap();
-    match client.socket.send_message(&OwnedMessage::Binary(packet.serialize())) {
-        Ok(_) => (),
-        Err(err) => warn!("Failed to send message: {:?}", err)
-    }
-    //client.socket.set_nonblocking(true).unwrap();
-}
-
-fn parse_peer(socket: &WsClient) -> String {
-    match socket.peer_addr() {
-        Ok(addr) => addr.to_string(),
-        Err(_) => "unknown".to_owned()
-    }
+    client.socket.send.try_send(packet.serialize()).unwrap_or_default();
 }

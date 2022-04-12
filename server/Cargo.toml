@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 remote64-common = { path = "../common" }
-websocket = { version = "0.26", default-features = false, features = ["sync", "sync-ssl"] }
+#websocket = { version = "0.26", default-features = false, features = ["sync", "sync-ssl"] }
 
 log = "0.4"
 env_logger = "0.9"

@@ -8,6 +8,7 @@ num_enum = "0.5"
 num-traits = "0.2"
 zstd = "*"
 crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
 
 log = "0.4"
 env_logger = "0.9"

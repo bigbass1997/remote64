@@ -36,6 +36,10 @@ impl<A, B> BidirectionalChannel<A, B> {
             }
         )
     }
+    
+    pub fn split(self) -> (Sender<A>, Receiver<B>) {
+        ( self.send, self.recv )
+    }
 }
 
 

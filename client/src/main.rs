@@ -4,13 +4,12 @@ extern crate env_logger;
 
 use std::cmp::max;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use clap::{AppSettings, Arg, Command};
 use crossbeam_queue::SegQueue;
 use log::LevelFilter;
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
-use websocket::OwnedMessage;
 use remote64_common::intercom::{BroadcastNetwork, InterMessage};
 use remote64_common::{Feature, Packet};
 use crate::socket::SocketManager;
@@ -88,7 +87,7 @@ fn main() {
         none: false
     }).unwrap();
     
-    window.limit_update_rate(Some(Duration::from_secs_f32(1.0/30.0)));
+    window.limit_update_rate(Some(Duration::from_secs_f32(1.0/15.0)));
     
     
     pa.is_output_format_supported(output_params, 44100.0).unwrap();
@@ -130,7 +129,7 @@ fn main() {
         while let Ok(msg) = frame_endpoint.recv.recv() {
             match msg {
                 InterMessage::BulkFrames(frames) => {
-                    println!("Bulk Received: {}", frames.len());
+                    debug!("Bulk Received: {}", frames.len());
                     for frame in frames {
                         video_queue.push(frame.video);
                         for sample in frame.audio {
@@ -151,40 +150,28 @@ fn main() {
         intercom.start();
     });
     
-    loop {
-        video_endpoint.send.try_send(InterMessage::SocketPacket(Packet::FrameRequest(1 as u32))).unwrap();
-        
-        std::thread::sleep(Duration::from_secs_f64(0.5));
-    }
     
+    let mut last_request = Instant::now();
     //let mut last_frame = Instant::now();
     //let mut last_audio = Instant::now();
-    /*while window.is_open() && !window.is_key_down(Key::Escape) {
-        while let Ok(_) = video_endpoint.recv.try_recv() {}
-        
+    while window.is_open() && !window.is_key_down(Key::Escape) {
         let queue_len = output_video_queue.len();
-        if queue_len < 300 {
-        println!("test2");
-            let remaining = max(15 - queue_len, 5);
+        if queue_len < 35 && last_request.elapsed() > Duration::from_millis(1000) {
+            let remaining = max(35 - queue_len, 20);
+            debug!("Framebuffer Health: Local: {} | Requested: {}", queue_len, remaining);
             
-        println!("test3");
-            video_endpoint.send.try_send(InterMessage::SocketPacket(Packet::FrameRequest(25 as u32))).unwrap();
-            println!("test333");
-            std::thread::sleep(Duration::from_secs_f64(5.0));
+            video_endpoint.send.try_send(InterMessage::SocketPacket(Packet::FrameRequest(remaining as u32))).unwrap();
+            
+            //std::thread::sleep(Duration::from_secs_f64(0.5));
+            last_request = Instant::now();
         }
-        println!("test4");
         
-        //let video = output_video_queue.pop();
-        let video: Option<Vec<u8>> = Some(vec![127u8; 720*480*3]);
-        println!("test5");
+        let video = output_video_queue.pop();
+        //let video: Option<Vec<u8>> = Some(vec![127u8; 720*480*3]);
         if video.is_none() {
-        println!("test6");
-            println!("len: {}", window_buf.len());
             window.update_with_buffer(&window_buf, WIDTH, HEIGHT).unwrap();
-        println!("test7");
             continue;
         }
-        println!("test8");
         let video = video.unwrap();
         
         
@@ -197,9 +184,9 @@ fn main() {
         }
         
         let elapsed = start.elapsed().as_micros() as f64 / 1000.0;
-        info!("Frame processing took: {:.3}ms | FPS: {:.2}", elapsed, 1000.0 / elapsed);
+        //info!("Frame processing took: {:.3}ms | FPS: {:.2}", elapsed, 1000.0 / elapsed);
         window.update_with_buffer(&window_buf, WIDTH, HEIGHT).unwrap();
-    }*/
+    }
     
     video_endpoint.send.try_send(InterMessage::Kill).unwrap_or_default();
     std::thread::sleep(Duration::from_secs(1));
