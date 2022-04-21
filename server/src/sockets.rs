@@ -79,11 +79,6 @@ impl SocketManager {
                     }
                     
                     while let Ok(msg) = client.socket.recv.try_recv() {
-                            /*OwnedMessage::Close(_) => {
-                                disconnects.push(i);
-                                info!("Client {} disconnected.", client.socket.peer);
-                                continue;
-                            },*/
                         let packet = match Packet::deserialize(&msg) {
                             Ok(packet) => packet,
                             Err(err) => {
@@ -133,6 +128,12 @@ impl SocketManager {
                             }
                             FrameRequest(_) => send_packet(client, RequestDenied),
                             
+                            Close => {
+                                disconnects.push(i);
+                                info!("Client {} disconnected.", client.socket.peer);
+                                break;
+                            },
+                            
                             InfoResponse(_) | QueueResponse(_) | FrameResponse(_) | RequestDenied | Unknown(_) => (),
                         }
                     }
@@ -148,6 +149,7 @@ impl SocketManager {
                     }
                 }
                 disconnects.sort();
+                disconnects.dedup();
                 for i in disconnects.iter().rev() {
                     if !sm.client_queue[*i].waiting {
                         endpoint.send.try_send(InterMessage::StopRecording).unwrap_or_default();

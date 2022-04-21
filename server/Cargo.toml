@@ -14,7 +14,7 @@ crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
 crossbeam-utils = "0.8"
 
-minifb = "0.20"
+minifb = "0.22"
 v4l = { version = "0.12", features = ["v4l2"] }
 portaudio = "0.7"
 image = "0.24"

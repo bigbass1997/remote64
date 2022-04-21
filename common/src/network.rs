@@ -2,12 +2,13 @@ use std::cmp::min;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender};
 use crossbeam_queue::SegQueue;
-use log::{debug, trace};
+use log::trace;
 use crate::intercom::BidirectionalChannel;
+use crate::util::InfCell;
 
 pub type Message = Vec<u8>;
 
@@ -76,18 +77,22 @@ pub struct SocketConnection {
     pub peer: SocketAddr,
 }
 impl SocketConnection {
-    pub fn new(mut stream: TcpStream) -> Self {
+    pub fn new(stream: TcpStream) -> Self {
         let (chan_pub, chan_owned) = BidirectionalChannel::<Message, Message>::new(None);
         
         stream.set_nonblocking(true).unwrap();
         stream.set_nodelay(true).unwrap();
         let peer = stream.peer_addr().unwrap();
         
+        let stream = Arc::new(Mutex::new(InfCell::new(stream)));
+        let sw = stream.clone();
+        let sr = stream.clone();
+        
         let mut workmsg_opt: Option<WorkingMessage> = None;
         let (send, recv) = chan_owned.split();
         std::thread::spawn(move || {
             loop {
-                while let Ok(msg) = recv.try_recv() {
+                while let Ok(msg) = recv.recv_timeout(Duration::from_secs(1)) {
                     let mut buf = vec![];
                     buf.extend_from_slice(&(msg.len() as u32).to_be_bytes());
                     buf.extend_from_slice(&msg);
@@ -97,7 +102,7 @@ impl SocketConnection {
                     while i < buf.len() {
                         let send_len = min(buf.len() - i, 1024 * 1024);
                         
-                        let len = match stream.write(&buf[i..(i + send_len)]) {
+                        let len = match sw.lock().unwrap().get_mut().write(&buf[i..(i + send_len)]) {
                             Ok(len) => len,
                             Err(_) => 0,
                         };
@@ -108,15 +113,19 @@ impl SocketConnection {
                     }
                     trace!("Message sent.");
                 }
-                
+            }
+        });
+        std::thread::spawn(move || {
+            //sr.lock().unwrap().get_mut().set_read_timeout(None).unwrap();
+            loop {
                 if workmsg_opt.is_none() {
                     let mut msg = WorkingMessage::default();
                     let mut len_buf = [0u8; 4];
-                    match stream.read_exact(&mut len_buf) {
+                    match sr.lock().unwrap().get_mut().read_exact(&mut len_buf) {
                         Ok(_) => (),
                         Err(err) => {
-                            trace!("Unable to read message len. {}", err);
-                            std::thread::sleep(Duration::from_secs(1));
+                            trace!("Unable to read message len. {:?}", err);
+                            std::thread::sleep(Duration::from_nanos(1));
                             continue;
                         }
                     }
@@ -129,7 +138,7 @@ impl SocketConnection {
                 let workmsg = workmsg_opt.as_mut().unwrap();
                 
                 let mut buf = vec![0u8; min(workmsg.msg_len as usize - workmsg.payload.len(), 1024 * 1024)];
-                let len = match stream.read(&mut buf) {
+                let len = match sr.lock().unwrap().get_mut().read(&mut buf) {
                     Ok(len) => len,
                     Err(_) => 0
                 };
@@ -146,8 +155,6 @@ impl SocketConnection {
                     send.try_send(workmsg_opt.unwrap().payload).unwrap_or_default();
                     workmsg_opt = None;
                 }
-                
-                //std::thread::sleep(Duration::from_nanos(1));
             }
         });
         

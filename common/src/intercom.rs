@@ -76,7 +76,7 @@ impl<T: Clone> BroadcastNetwork<T> {
     /// Begins processing messages being sent in the network.
     /// 
     /// Notice! This call blocks until the network has no remaining endpoints.
-    pub fn start(mut self) {
+    pub fn start(self) {
         let mut indices = Vec::with_capacity(self.channels.len());
         loop {
             if self.channels.is_empty() {

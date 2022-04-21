@@ -27,7 +27,8 @@ pub const ID_QUEUE_REQ: u8 = 0x05;
 pub const ID_QUEUE_RES: u8 = 0x06;
 pub const ID_FRAME_REQ: u8 = 0x07;
 pub const ID_FRAME_RES: u8 = 0x08;
-pub const ID_REQ_DENIED: u8 = 0xFE;
+pub const ID_REQ_DENIED: u8 = 0xFD;
+pub const ID_CLOSE: u8 = 0xFE;
 pub const ID_UNKNOWN: u8 = 0xFF;
 
 
@@ -126,6 +127,7 @@ pub enum Packet {
     FrameRequest(u32), //TODO: Add image formatting and options to request (allow client to specify lower resolutions or lossy quality)
     FrameResponse(Vec<Frame>), //TODO: Add image datastructure to convey format of image (necessary once resolution/lossy options are implemented)
     RequestDenied,
+    Close,
     Unknown(Vec<u8>),
 }
 use Packet::*;
@@ -182,6 +184,7 @@ impl Packet {
             },
             
             ID_REQ_DENIED => Ok(RequestDenied),
+            ID_CLOSE => Ok(Close),
             _ => Ok(Unknown(data.to_vec()))
         }
     }
@@ -198,6 +201,7 @@ impl Packet {
             FrameResponse(_) => ID_FRAME_RES,
             
             RequestDenied => ID_REQ_DENIED,
+            Close => ID_CLOSE,
             Unknown(_) => ID_UNKNOWN
         }
     }
@@ -225,6 +229,7 @@ impl Packet {
             },
             
             RequestDenied => (),
+            Close => (),
             Unknown(data) => raw.extend_from_slice(&data),
         }
         

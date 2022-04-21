@@ -75,16 +75,14 @@ impl SocketManager {
                                 _ => ()
                             }
                         },
-                        Err(err) => {
-                            //println!("ERR: {}", err);
-                            break;
-                        }
+                        Err(_) => break
                     }
                 }
                 
                 std::thread::sleep(Duration::from_nanos(1));
             }
             
+            sm.socket.send.send_timeout(Packet::Close.serialize(), Duration::from_secs(1)).unwrap_or_default();
             //sm.socket.send_message(&OwnedMessage::Close(None)).unwrap();
         }).unwrap();
     }
