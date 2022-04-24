@@ -4,7 +4,7 @@ extern crate env_logger;
 
 use std::cmp::max;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use clap::{AppSettings, Arg, Command};
 use crossbeam_queue::SegQueue;
@@ -150,24 +150,24 @@ fn main() {
         intercom.start();
     });
     
-    
     let mut last_request = Instant::now();
-    //let mut last_frame = Instant::now();
-    //let mut last_audio = Instant::now();
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let queue_len = output_video_queue.len();
         if queue_len < 35 && last_request.elapsed() > Duration::from_millis(1000) {
             let remaining = max(35 - queue_len, 20);
             debug!("Framebuffer Health: Local: {} | Requested: {}", queue_len, remaining);
+            if queue_len == 0 {
+                warn!("Framebuffer is starving...");
+            }
             
-            video_endpoint.send.try_send(InterMessage::SocketPacket(Packet::FrameRequest(remaining as u32))).unwrap();
+            if remaining > 0 {
+                video_endpoint.send.try_send(InterMessage::SocketPacket(Packet::FrameRequest(remaining as u32))).unwrap();
+            }
             
-            //std::thread::sleep(Duration::from_secs_f64(0.5));
             last_request = Instant::now();
         }
         
         let video = output_video_queue.pop();
-        //let video: Option<Vec<u8>> = Some(vec![127u8; 720*480*3]);
         if video.is_none() {
             window.update_with_buffer(&window_buf, WIDTH, HEIGHT).unwrap();
             continue;
@@ -175,7 +175,6 @@ fn main() {
         let video = video.unwrap();
         
         
-        let start = Instant::now();
         for i in 0..window_buf.len() {
             let r = video[(i * 3)];
             let g = video[(i * 3) + 1];
@@ -183,8 +182,6 @@ fn main() {
             window_buf[i] = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
         }
         
-        let elapsed = start.elapsed().as_micros() as f64 / 1000.0;
-        //info!("Frame processing took: {:.3}ms | FPS: {:.2}", elapsed, 1000.0 / elapsed);
         window.update_with_buffer(&window_buf, WIDTH, HEIGHT).unwrap();
     }
     
