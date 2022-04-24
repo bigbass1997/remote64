@@ -7,6 +7,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use clap::{AppSettings, Arg, Command};
+use cpal::{BufferSize, SampleRate, StreamConfig};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::SegQueue;
 use log::LevelFilter;
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
@@ -25,12 +27,6 @@ fn main() {
     // Run clap to parse cli arguments
     let matches = Command::new("remote64-client")
         .version(clap::crate_version!())
-        .arg(Arg::new("log-level")
-            .long("log-level")
-            .takes_value(true)
-            .default_value("info")
-            .possible_values(["error", "warn", "info", "debug", "trace"])
-            .help("Specify the console log level. Environment variable 'RUST_LOG' will override this option."))
         .arg(Arg::new("features")
             .short('f')
             .long("feature")
@@ -41,12 +37,20 @@ fn main() {
         .arg(Arg::new("domain")
             .long("domain")
             .takes_value(true))
+        .arg(Arg::new("verbose")
+            .short('v')
+            .long("verbose")
+            .takes_value(true)
+            .default_missing_value("debug")
+            .default_value("info")
+            .possible_values(["error", "warn", "info", "debug", "trace"])
+            .help("Specify the console log level. Environment variable 'RUST_LOG' will override this option."))
         .next_line_help(true)
         .setting(AppSettings::DeriveDisplayOrder)
         .get_matches();
     
     // Setup program-wide logger format
-    let level = match std::env::var("RUST_LOG").unwrap_or(matches.value_of("log-level").unwrap_or("info").to_owned()).as_str() {
+    let level = match std::env::var("RUST_LOG").unwrap_or(matches.value_of("verbose").unwrap_or("info").to_owned()).as_str() {
         "error" => LevelFilter::Error,
         "warn" => LevelFilter::Warn,
         "info" => LevelFilter::Info,
@@ -68,12 +72,6 @@ fn main() {
     // Initialize socket manager which handles the client's connection with the remote64 server
     SocketManager::init(matches.value_of("domain"), features, intercom.endpoint());
     
-    let pa = portaudio::PortAudio::new().unwrap();
-    let output_device_id = pa.default_output_device().unwrap();
-    let output_device_info = pa.device_info(output_device_id).unwrap();
-    let latency = output_device_info.default_low_output_latency;
-    let output_params = portaudio::StreamParameters::<f32>::new(output_device_id, 2, true, latency);
-    
     
     let mut window_buf: Vec<u32> = vec![0; WIDTH * HEIGHT];
     let mut window = Window::new("remote64-client", WIDTH, HEIGHT, WindowOptions {
@@ -89,36 +87,32 @@ fn main() {
     
     window.limit_update_rate(Some(Duration::from_secs_f32(1.0/15.0)));
     
-    
-    pa.is_output_format_supported(output_params, 44100.0).unwrap();
-    
-    let settings = portaudio::OutputStreamSettings::new(output_params, 44100.0, 512);
-    
     let audio_queue = Arc::new(SegQueue::new());
     let callback_audio_queue = audio_queue.clone();
-    let callback = move |portaudio::stream::OutputCallbackArgs {
-                             buffer,
-                             frames: _,
-                             flags, 
-                             time: _,
-                        }| {
-        if !flags.is_empty() {
-            debug!("flags: {:?}", flags);
-        }
-        
-        for output_sample in buffer.iter_mut() {
-            if let Some(sample) = callback_audio_queue.pop() {
-                *output_sample = sample;
-            } else {
-                *output_sample = 0.0;
-            }
-        }
-        
-        portaudio::Continue
-    };
     
-    let mut audio_stream = pa.open_non_blocking_stream(settings, callback).unwrap();
-    audio_stream.start().unwrap();
+    let audio_host = cpal::default_host();
+    let audio_device = audio_host.default_output_device().unwrap();
+    let config = StreamConfig {
+        channels: 2,
+        sample_rate: SampleRate(44100),
+        buffer_size: BufferSize::Fixed(256),
+    };
+    let stream = audio_device.build_output_stream(
+        &config,
+        move |output_buffer: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+            for output_sample in output_buffer.iter_mut() {
+                if let Some(sample) = callback_audio_queue.pop() {
+                    *output_sample = sample;
+                } else {
+                    *output_sample = 0.0;
+                }
+            }
+        },
+        move |_| {
+            //
+        }
+    ).unwrap();
+    stream.play().unwrap();
     
     let video_queue = Arc::new(SegQueue::<Vec<u8>>::new());
     let output_video_queue = video_queue.clone();
